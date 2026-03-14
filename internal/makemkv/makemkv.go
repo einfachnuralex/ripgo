@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -236,8 +237,9 @@ func DetectContentType(titles []Title) Detection {
 			tvLike++
 		}
 	}
+	avg := mean(durations)
 	tvRatio := float64(tvLike) / float64(len(durations))
-	cv := coefficientOfVariation(durations)
+	cv := coefficientOfVariation(durations, avg)
 
 	if tvRatio >= 0.7 {
 		switch {
@@ -249,7 +251,6 @@ func DetectContentType(titles []Title) Detection {
 	}
 
 	// One dominant long title + several shorter ones → movie with extras
-	avg := mean(durations)
 	longCount := 0
 	for _, d := range durations {
 		if d > avg*1.5 {
@@ -311,11 +312,7 @@ func sortedTitles(m map[int]*Title) []Title {
 	for _, t := range m {
 		result = append(result, *t)
 	}
-	for i := 1; i < len(result); i++ {
-		for j := i; j > 0 && result[j].ID < result[j-1].ID; j-- {
-			result[j], result[j-1] = result[j-1], result[j]
-		}
-	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result
 }
 
@@ -330,8 +327,7 @@ func mean(vals []float64) float64 {
 	return sum / float64(len(vals))
 }
 
-func stddev(vals []float64) float64 {
-	m := mean(vals)
+func stddev(vals []float64, m float64) float64 {
 	variance := 0.0
 	for _, v := range vals {
 		d := v - m
@@ -340,10 +336,9 @@ func stddev(vals []float64) float64 {
 	return math.Sqrt(variance / float64(len(vals)))
 }
 
-func coefficientOfVariation(vals []float64) float64 {
-	m := mean(vals)
+func coefficientOfVariation(vals []float64, m float64) float64 {
 	if m == 0 {
 		return 0
 	}
-	return stddev(vals) / m
+	return stddev(vals, m) / m
 }

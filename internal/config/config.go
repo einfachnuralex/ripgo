@@ -10,6 +10,36 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// rawConfig mirrors the structure of the YAML config file.
+type rawConfig struct {
+	Disc struct {
+		DefaultPath    string `yaml:"default_path"`
+		DefaultTempDir string `yaml:"default_temp_dir"`
+	} `yaml:"disc"`
+
+	Output struct {
+		MoviesDir string `yaml:"movies_dir"`
+		TVDir     string `yaml:"tv_dir"`
+	} `yaml:"output"`
+
+	Encoding struct {
+		IncludeSubtitles     bool     `yaml:"include_subtitles"`
+		IncludeStereoAudio   bool     `yaml:"include_stereo_audio"`
+		IncludeSurroundAudio bool     `yaml:"include_surround_audio"`
+		Languages            []string `yaml:"languages"`
+		MinMovieDuration     int      `yaml:"min_movie_duration_seconds"`
+		MinEpisodeDuration   int      `yaml:"min_episode_duration_seconds"`
+		MaxEpisodeDuration   int      `yaml:"max_episode_duration_seconds"`
+	} `yaml:"encoding"`
+
+	Metadata struct {
+		LookupEnabled bool   `yaml:"lookup_enabled"`
+		TMDBKey       string `yaml:"tmdb_api_key"`
+		OMDBKey       string `yaml:"omdb_api_key"`
+		TVDBKey       string `yaml:"tvdb_api_key"`
+	} `yaml:"metadata"`
+}
+
 // Config holds all runtime settings merged from the config file and environment variables.
 type Config struct {
 	DiscPath           string
@@ -33,7 +63,7 @@ type Config struct {
 func Defaults() *Config {
 	return &Config{
 		DiscPath:           "disc:0",
-		Languages:          []string{"eng"},
+		Languages:          []string{"eng", "ger"},
 		StereoAudio:        true,
 		SurroundAudio:      true,
 		MinMovieDuration:   1800, // 30 min
@@ -55,31 +85,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("reading config %s: %w", path, err)
 	}
 
-	var raw struct {
-		Disc struct {
-			DefaultPath    string `yaml:"default_path"`
-			DefaultTempDir string `yaml:"default_temp_dir"`
-		} `yaml:"disc"`
-		Output struct {
-			MoviesDir string `yaml:"movies_dir"`
-			TVDir     string `yaml:"tv_dir"`
-		} `yaml:"output"`
-		Encoding struct {
-			IncludeSubtitles    bool     `yaml:"include_subtitles"`
-			IncludeStereoAudio  bool     `yaml:"include_stereo_audio"`
-			IncludeSurroundAudio bool    `yaml:"include_surround_audio"`
-			Languages           []string `yaml:"languages"`
-			MinMovieDuration    int      `yaml:"min_movie_duration_seconds"`
-			MinEpisodeDuration  int      `yaml:"min_episode_duration_seconds"`
-			MaxEpisodeDuration  int      `yaml:"max_episode_duration_seconds"`
-		} `yaml:"encoding"`
-		Metadata struct {
-			LookupEnabled bool   `yaml:"lookup_enabled"`
-			TMDBKey       string `yaml:"tmdb_api_key"`
-			OMDBKey       string `yaml:"omdb_api_key"`
-			TVDBKey       string `yaml:"tvdb_api_key"`
-		} `yaml:"metadata"`
-	}
+	var raw rawConfig
 
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
@@ -144,31 +150,30 @@ func findFile() (string, error) {
 
 func searchPaths() []string {
 	var paths []string
+	home, _ := os.UserHomeDir()
 
 	switch runtime.GOOS {
 	case "windows":
 		if appdata := os.Getenv("APPDATA"); appdata != "" {
-			paths = append(paths, filepath.Join(appdata, "ripsharp", "config.yaml"))
+			paths = append(paths, filepath.Join(appdata, "ripgo", "config.yaml"))
 		}
-		if home, err := os.UserHomeDir(); err == nil {
-			paths = append(paths, filepath.Join(home, ".ripsharp.yaml"))
+		if home != "" {
+			paths = append(paths, filepath.Join(home, ".ripgo.yaml"))
 		}
 	default: // linux, darwin
 		xdg := os.Getenv("XDG_CONFIG_HOME")
-		if xdg == "" {
-			if home, err := os.UserHomeDir(); err == nil {
-				xdg = filepath.Join(home, ".config")
-			}
+		if xdg == "" && home != "" {
+			xdg = filepath.Join(home, ".config")
 		}
 		if xdg != "" {
-			paths = append(paths, filepath.Join(xdg, "ripsharp", "config.yaml"))
+			paths = append(paths, filepath.Join(xdg, "ripgo", "config.yaml"))
 		}
-		if home, err := os.UserHomeDir(); err == nil {
-			paths = append(paths, filepath.Join(home, ".ripsharp.yaml"))
+		if home != "" {
+			paths = append(paths, filepath.Join(home, ".ripgo.yaml"))
 		}
 	}
 
-	paths = append(paths, "ripsharp.yaml", "config.yaml")
+	paths = append(paths, "ripgo.yaml", "config.yaml")
 	return paths
 }
 

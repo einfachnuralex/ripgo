@@ -3,7 +3,6 @@ package ripper
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,9 +31,8 @@ type Options struct {
 
 // Ripper orchestrates disc scanning, ripping, encoding, and file naming.
 type Ripper struct {
-	cfg      *config.Config
-	opts     Options
-	tempAuto bool
+	cfg  *config.Config
+	opts Options
 }
 
 // New creates a Ripper with the given config and options.
@@ -48,11 +46,11 @@ func (r *Ripper) Run(ctx context.Context) error {
 		return fmt.Errorf("creating output dir: %w", err)
 	}
 
-	tempDir, err := r.prepareTempDir()
+	tempDir, autoTemp, err := r.prepareTempDir()
 	if err != nil {
 		return err
 	}
-	if r.tempAuto {
+	if autoTemp {
 		defer os.RemoveAll(tempDir)
 	}
 
@@ -197,55 +195,6 @@ func (r *Ripper) runParallel(ctx context.Context, titles []makemkv.Title, meta *
 	return nil
 }
 
-// ---- sequential pipeline (rip all, then encode all) ----
-
-func (r *Ripper) runSequential(ctx context.Context, titles []makemkv.Title, meta *metadata.Info, isTV bool, tempDir string, metaCfg metadata.Config) error {
-	var ripped []ripJob
-
-	for i, title := range titles {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		titleDir := filepath.Join(tempDir, fmt.Sprintf("title_%02d", title.ID))
-		if err := os.MkdirAll(titleDir, 0o755); err != nil {
-			return fmt.Errorf("creating title dir: %w", err)
-		}
-
-		label := episodeLabel(i, isTV, r.opts.Season, r.opts.EpisodeStart, title)
-		printInfo("[%d/%d] Ripping %s…", i+1, len(titles), label)
-
-		pb := newBar(fmt.Sprintf("Rip  %s", label))
-		err := makemkv.RipTitle(ctx, r.cfg.DiscPath, title.ID, titleDir,
-			func(frac float64, _ string) {
-				if frac >= 0 {
-					pb.set(frac)
-				}
-			}, r.opts.Debug)
-		pb.done()
-
-		if err != nil {
-			return fmt.Errorf("ripping title %d: %w", title.ID, err)
-		}
-
-		path, err := makemkv.FindRippedFile(titleDir)
-		if err != nil {
-			return fmt.Errorf("finding ripped file: %w", err)
-		}
-		ripped = append(ripped, ripJob{title: title, index: i, rippedPath: path})
-	}
-
-	for _, job := range ripped {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err := r.encodeOne(ctx, job, meta, isTV, r.opts.Output, metaCfg); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // ---- per-title encoding + naming ----
 
 func (r *Ripper) encodeOne(ctx context.Context, job ripJob, meta *metadata.Info, isTV bool, outputDir string, metaCfg metadata.Config) error {
@@ -285,21 +234,19 @@ func (r *Ripper) encodeOne(ctx context.Context, job ripJob, meta *metadata.Info,
 
 // ---- temp dir management ----
 
-func (r *Ripper) prepareTempDir() (string, error) {
+func (r *Ripper) prepareTempDir() (dir string, autoCreated bool, err error) {
 	if r.cfg.TempDir != "" {
 		if err := os.MkdirAll(r.cfg.TempDir, 0o755); err != nil {
-			return "", fmt.Errorf("creating temp dir: %w", err)
+			return "", false, fmt.Errorf("creating temp dir: %w", err)
 		}
-		return r.cfg.TempDir, nil
+		return r.cfg.TempDir, false, nil
 	}
 
-	// Auto-generate a unique temp directory
-	dir := filepath.Join(os.TempDir(), fmt.Sprintf("ripsharp-%x", rand.Int63()))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("creating temp dir: %w", err)
+	dir, err = os.MkdirTemp("", "ripgo-")
+	if err != nil {
+		return "", false, fmt.Errorf("creating temp dir: %w", err)
 	}
-	r.tempAuto = true
-	return dir, nil
+	return dir, true, nil
 }
 
 // ---- content type resolution ----
@@ -459,4 +406,53 @@ func printWarn(format string, args ...any) {
 
 func printInfo(format string, args ...any) {
 	fmt.Printf(colorCyan+"→ "+colorReset+format+"\n", args...)
+}
+
+// ---- sequential pipeline (rip all, then encode all) ----
+
+func (r *Ripper) runSequential(ctx context.Context, titles []makemkv.Title, meta *metadata.Info, isTV bool, tempDir string, metaCfg metadata.Config) error {
+	var ripped []ripJob
+
+	for i, title := range titles {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		titleDir := filepath.Join(tempDir, fmt.Sprintf("title_%02d", title.ID))
+		if err := os.MkdirAll(titleDir, 0o755); err != nil {
+			return fmt.Errorf("creating title dir: %w", err)
+		}
+
+		label := episodeLabel(i, isTV, r.opts.Season, r.opts.EpisodeStart, title)
+		printInfo("[%d/%d] Ripping %s…", i+1, len(titles), label)
+
+		pb := newBar(fmt.Sprintf("Rip  %s", label))
+		err := makemkv.RipTitle(ctx, r.cfg.DiscPath, title.ID, titleDir,
+			func(frac float64, _ string) {
+				if frac >= 0 {
+					pb.set(frac)
+				}
+			}, r.opts.Debug)
+		pb.done()
+
+		if err != nil {
+			return fmt.Errorf("ripping title %d: %w", title.ID, err)
+		}
+
+		path, err := makemkv.FindRippedFile(titleDir)
+		if err != nil {
+			return fmt.Errorf("finding ripped file: %w", err)
+		}
+		ripped = append(ripped, ripJob{title: title, index: i, rippedPath: path})
+	}
+
+	for _, job := range ripped {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := r.encodeOne(ctx, job, meta, isTV, r.opts.Output, metaCfg); err != nil {
+			return err
+		}
+	}
+	return nil
 }

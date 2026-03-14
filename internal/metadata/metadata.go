@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -184,6 +183,11 @@ var tvdbCache struct {
 	expires time.Time
 }
 
+var tvdbIDCache struct {
+	sync.Mutex
+	ids map[string]int
+}
+
 func tvdbToken(ctx context.Context, apiKey string) (string, error) {
 	tvdbCache.Lock()
 	defer tvdbCache.Unlock()
@@ -210,11 +214,7 @@ func tvdbToken(ctx context.Context, apiKey string) (string, error) {
 			Token string `json:"token"`
 		} `json:"data"`
 	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	if err := json.Unmarshal(data, &authResp); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
 		return "", err
 	}
 	if authResp.Data.Token == "" {
@@ -255,6 +255,15 @@ func tvdbSearch(ctx context.Context, title, apiKey string) (*Info, error) {
 }
 
 func tvdbSeriesID(ctx context.Context, title, token string) (int, error) {
+	tvdbIDCache.Lock()
+	if tvdbIDCache.ids != nil {
+		if id, ok := tvdbIDCache.ids[title]; ok {
+			tvdbIDCache.Unlock()
+			return id, nil
+		}
+	}
+	tvdbIDCache.Unlock()
+
 	apiURL := "https://api4.thetvdb.com/v4/search?query=" + url.QueryEscape(title) + "&type=series"
 
 	var resp struct {
@@ -269,7 +278,15 @@ func tvdbSeriesID(ctx context.Context, title, token string) (int, error) {
 	if len(resp.Data) == 0 {
 		return 0, fmt.Errorf("series not found: %q", title)
 	}
-	return resp.Data[0].TVDBId, nil
+
+	id := resp.Data[0].TVDBId
+	tvdbIDCache.Lock()
+	if tvdbIDCache.ids == nil {
+		tvdbIDCache.ids = make(map[string]int)
+	}
+	tvdbIDCache.ids[title] = id
+	tvdbIDCache.Unlock()
+	return id, nil
 }
 
 func tvdbEpisodeTitle(ctx context.Context, seriesID, season, episode int, token string) (string, error) {
@@ -315,9 +332,5 @@ func getJSON(ctx context.Context, rawURL string, headers map[string]string, out 
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(data, out)
+	return json.NewDecoder(resp.Body).Decode(out)
 }

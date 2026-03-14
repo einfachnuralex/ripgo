@@ -207,37 +207,33 @@ func buildArgs(input, output string, streams []Stream) []string {
 		"-vf", "bwdif=mode=send_frame:parity=auto:deint=interlaced",
 	)
 
-	// Audio: copy compatible codecs, transcode others to AAC
+	// Audio: copy compatible codecs, transcode others to AAC; detect subtitles in same pass
 	audioIdx := 0
 	hasAudio := false
+	hasSubs := false
 	for _, s := range streams {
-		if s.Type != "audio" {
-			continue
+		switch s.Type {
+		case "audio":
+			hasAudio = true
+			codec := strings.ToLower(s.Codec)
+			if codec == "aac" || codec == "ac3" || codec == "eac3" {
+				args = append(args, fmt.Sprintf("-c:a:%d", audioIdx), "copy")
+			} else {
+				args = append(args,
+					fmt.Sprintf("-c:a:%d", audioIdx), "aac",
+					fmt.Sprintf("-b:a:%d", audioIdx), "160k",
+				)
+			}
+			audioIdx++
+		case "subtitle":
+			hasSubs = true
 		}
-		hasAudio = true
-		codec := strings.ToLower(s.Codec)
-		if codec == "aac" || codec == "ac3" || codec == "eac3" {
-			args = append(args, fmt.Sprintf("-c:a:%d", audioIdx), "copy")
-		} else {
-			args = append(args,
-				fmt.Sprintf("-c:a:%d", audioIdx), "aac",
-				fmt.Sprintf("-b:a:%d", audioIdx), "160k",
-			)
-		}
-		audioIdx++
 	}
 	if !hasAudio {
 		args = append(args, "-an")
 	}
 
 	// Subtitles: copy (soft subs, no burn-in)
-	hasSubs := false
-	for _, s := range streams {
-		if s.Type == "subtitle" {
-			hasSubs = true
-			break
-		}
-	}
 	if hasSubs {
 		args = append(args, "-c:s", "copy")
 	} else {
