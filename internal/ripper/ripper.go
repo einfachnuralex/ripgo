@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/einfachnuralex/ripgo/internal/config"
 	"github.com/einfachnuralex/ripgo/internal/encoder"
 	"github.com/einfachnuralex/ripgo/internal/makemkv"
@@ -54,7 +56,8 @@ func (r *Ripper) Run(ctx context.Context) error {
 		defer os.RemoveAll(tempDir)
 	}
 
-	// Scan disc
+	// ---- Phase 1: scan/detect/metadata (plain stdout, no TUI) ----
+
 	printInfo("Scanning disc %s…", r.cfg.DiscPath)
 	disc, err := makemkv.ScanDisc(ctx, r.cfg.DiscPath, r.opts.Debug)
 	if err != nil {
@@ -65,13 +68,12 @@ func (r *Ripper) Run(ctx context.Context) error {
 	}
 	printOK("Disc: %s (%s), %d title(s) found", disc.Name, strings.ToUpper(disc.Type), len(disc.Titles))
 
-	// Determine content type
+	// resolveContentType may call fmt.Scanln — must run before TUI takes the terminal.
 	isTV, err := r.resolveContentType(disc)
 	if err != nil {
 		return err
 	}
 
-	// Filter to relevant titles
 	titles := makemkv.FilterTitles(disc.Titles, isTV,
 		r.cfg.MinMovieDuration, r.cfg.MinEpisodeDuration, r.cfg.MaxEpisodeDuration)
 	if len(titles) == 0 {
@@ -79,7 +81,6 @@ func (r *Ripper) Run(ctx context.Context) error {
 	}
 	printInfo("Processing %d title(s) as %s", len(titles), contentLabel(isTV))
 
-	// Metadata lookup
 	sourceTitle := r.opts.Title
 	if sourceTitle == "" {
 		sourceTitle = disc.Name
@@ -107,10 +108,27 @@ func (r *Ripper) Run(ctx context.Context) error {
 		printOK("Metadata: %s (%d)", meta.Title, meta.Year)
 	}
 
-	if r.opts.Sequential {
-		return r.runSequential(ctx, titles, meta, isTV, tempDir, metaCfg)
+	// ---- Phase 2: rip+encode with bubbletea TUI ----
+
+	p := tea.NewProgram(uiModel{}, tea.WithOutput(os.Stdout))
+	uiProg = p
+
+	go func() {
+		var workErr error
+		if r.opts.Sequential {
+			workErr = r.runSequential(ctx, titles, meta, isTV, tempDir, metaCfg)
+		} else {
+			workErr = r.runParallel(ctx, titles, meta, isTV, tempDir, metaCfg)
+		}
+		p.Send(msgQuit{err: workErr})
+	}()
+
+	finalModel, runErr := p.Run()
+	uiProg = nil
+	if runErr != nil {
+		return fmt.Errorf("tui: %w", runErr)
 	}
-	return r.runParallel(ctx, titles, meta, isTV, tempDir, metaCfg)
+	return finalModel.(uiModel).workErr
 }
 
 // ---- parallel pipeline (rip → encode concurrently) ----
@@ -160,7 +178,7 @@ func (r *Ripper) runParallel(ctx context.Context, titles []makemkv.Title, meta *
 		label := episodeLabel(i, isTV, r.opts.Season, r.opts.EpisodeStart, title)
 		printInfo("[%d/%d] Ripping %s…", i+1, len(titles), label)
 
-		pb := newBar(fmt.Sprintf("Rip  %s", label))
+		pb := newBar(slotRip, fmt.Sprintf("Rip  %s", label))
 		err := makemkv.RipTitle(ctx, r.cfg.DiscPath, title.ID, titleDir,
 			func(frac float64, caption string) {
 				if frac >= 0 {
@@ -218,7 +236,7 @@ func (r *Ripper) encodeOne(ctx context.Context, job ripJob, meta *metadata.Info,
 		SurroundAudio: r.cfg.SurroundAudio,
 	}
 
-	pb := newBar(fmt.Sprintf("Enc  %s", label))
+	pb := newBar(slotEnc, fmt.Sprintf("Enc  %s", label))
 	err := encoder.Encode(ctx, job.rippedPath, outPath, settings,
 		func(frac float64) { pb.set(frac) },
 		r.opts.Debug)
@@ -266,7 +284,7 @@ func (r *Ripper) resolveContentType(disc *makemkv.DiscInfo) (bool, error) {
 		return det.IsTV, nil
 	}
 
-	// Low confidence — ask the user
+	// Low confidence — ask the user (safe here: TUI not started yet)
 	hint := ""
 	if det.Confidence > 0 {
 		hint = fmt.Sprintf(" (detected %s, %.0f%% confidence)", contentLabel(det.IsTV), det.Confidence*100)
@@ -287,7 +305,7 @@ func sanitize(s string) string {
 	return strings.TrimSpace(invalidChars.ReplaceAllString(s, "_"))
 }
 
-func buildOutputPath(dir string, meta *metadata.Info, isTV bool, season, episode int, epTitle string, titleIndex int, hasTitleName bool) string {
+func buildOutputPath(dir string, meta *metadata.Info, isTV bool, season, episode int, epTitle string, titleIndex int, _ bool) string {
 	if isTV {
 		name := fmt.Sprintf("%s - S%02dE%02d", sanitize(meta.Title), season, episode)
 		if epTitle != "" {
@@ -301,7 +319,6 @@ func buildOutputPath(dir string, meta *metadata.Info, isTV bool, season, episode
 	if meta.Year > 0 {
 		base = fmt.Sprintf("%s (%d)", base, meta.Year)
 	}
-	// Disambiguate multiple titles (alternate cuts, bonus discs, etc.)
 	if titleIndex > 0 {
 		base = fmt.Sprintf("%s - title%02d", base, titleIndex+1)
 	}
@@ -330,7 +347,7 @@ func contentLabel(isTV bool) string {
 	return "movie"
 }
 
-// ---- terminal progress bar ----
+// ---- bubbletea TUI ----
 
 const (
 	colorReset  = "\033[0m"
@@ -340,17 +357,107 @@ const (
 	colorCyan   = "\033[36m"
 )
 
-type bar struct {
-	mu      sync.Mutex
-	label   string
-	lastPct int
-	start   time.Time
+// uiProg is nil during Phase 1 (scan/detect/metadata) and set for Phase 2 (rip+encode).
+var uiProg *tea.Program
+
+// barSlot identifies which of the two progress bar slots to use.
+type barSlot int
+
+const (
+	slotRip barSlot = 0
+	slotEnc barSlot = 1
+)
+
+// TUI message types
+type msgLog struct{ text string }
+type msgBarStart struct {
+	slot  barSlot
+	label string
+}
+type msgProgress struct {
+	slot  barSlot
+	pct   int    // -1 = label-only update
+	label string // empty = no label change
+}
+type msgBarDone struct {
+	slot  barSlot
+	label string
+}
+type msgQuit struct{ err error }
+
+type liveBar struct {
+	label string
+	pct   int
+	start time.Time
 }
 
-func newBar(label string) *bar {
-	b := &bar{label: label, start: time.Now()}
-	fmt.Printf("  %-36s [          ]   0%%\r", truncate(label, 36))
-	return b
+type uiModel struct {
+	slots   [2]*liveBar
+	workErr error
+}
+
+func (m uiModel) Init() tea.Cmd { return nil }
+
+func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if msg.Type == tea.KeyCtrlC {
+			return m, tea.Quit
+		}
+	case msgLog:
+		return m, tea.Println(msg.text)
+	case msgBarStart:
+		m.slots[msg.slot] = &liveBar{label: msg.label, start: time.Now()}
+	case msgProgress:
+		if s := m.slots[msg.slot]; s != nil {
+			if msg.pct >= 0 {
+				s.pct = msg.pct
+			}
+			if msg.label != "" {
+				s.label = msg.label
+			}
+		}
+	case msgBarDone:
+		elapsed := ""
+		if s := m.slots[msg.slot]; s != nil {
+			elapsed = time.Since(s.start).Round(time.Second).String()
+		}
+		m.slots[msg.slot] = nil
+		line := fmt.Sprintf("  %-36s [==========] 100%% (%s)", truncate(msg.label, 36), elapsed)
+		return m, tea.Println(line)
+	case msgQuit:
+		m.workErr = msg.err
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m uiModel) View() string {
+	var sb strings.Builder
+	for _, s := range m.slots {
+		if s == nil {
+			continue
+		}
+		filled := s.pct / 10
+		barStr := strings.Repeat("=", filled) + strings.Repeat(" ", 10-filled)
+		fmt.Fprintf(&sb, "  %-36s [%s] %3d%%\n", truncate(s.label, 36), barStr, s.pct)
+	}
+	return sb.String()
+}
+
+// ---- progress bar handle ----
+
+type bar struct {
+	slot    barSlot
+	label   string
+	lastPct int
+}
+
+func newBar(slot barSlot, label string) *bar {
+	if uiProg != nil {
+		uiProg.Send(msgBarStart{slot: slot, label: label})
+	}
+	return &bar{slot: slot, label: label}
 }
 
 func (b *bar) set(frac float64) {
@@ -361,28 +468,26 @@ func (b *bar) set(frac float64) {
 		frac = 1
 	}
 	pct := int(frac * 100)
-
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	if pct == b.lastPct {
 		return
 	}
 	b.lastPct = pct
-
-	filled := pct / 10
-	barStr := strings.Repeat("=", filled) + strings.Repeat(" ", 10-filled)
-	fmt.Printf("  %-36s [%s] %3d%%\r", truncate(b.label, 36), barStr, pct)
+	if uiProg != nil {
+		uiProg.Send(msgProgress{slot: b.slot, pct: pct})
+	}
 }
 
 func (b *bar) setLabel(label string) {
-	b.mu.Lock()
 	b.label = label
-	b.mu.Unlock()
+	if uiProg != nil {
+		uiProg.Send(msgProgress{slot: b.slot, pct: -1, label: label})
+	}
 }
 
 func (b *bar) done() {
-	elapsed := time.Since(b.start).Round(time.Second)
-	fmt.Printf("  %-36s [==========] 100%% (%s)\n", truncate(b.label, 36), elapsed)
+	if uiProg != nil {
+		uiProg.Send(msgBarDone{slot: b.slot, label: b.label})
+	}
 }
 
 func truncate(s string, n int) string {
@@ -393,19 +498,39 @@ func truncate(s string, n int) string {
 }
 
 func printOK(format string, args ...any) {
-	fmt.Printf(colorGreen+"✓ "+colorReset+format+"\n", args...)
+	line := colorGreen + "✓ " + colorReset + fmt.Sprintf(format, args...)
+	if uiProg != nil {
+		uiProg.Send(msgLog{text: line})
+	} else {
+		fmt.Println(line)
+	}
 }
 
 func printErr(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, colorRed+"✗ "+colorReset+format+"\n", args...)
+	line := colorRed + "✗ " + colorReset + fmt.Sprintf(format, args...)
+	if uiProg != nil {
+		uiProg.Send(msgLog{text: line})
+	} else {
+		fmt.Println(line)
+	}
 }
 
 func printWarn(format string, args ...any) {
-	fmt.Printf(colorYellow+"⚠ "+colorReset+format+"\n", args...)
+	line := colorYellow + "⚠ " + colorReset + fmt.Sprintf(format, args...)
+	if uiProg != nil {
+		uiProg.Send(msgLog{text: line})
+	} else {
+		fmt.Println(line)
+	}
 }
 
 func printInfo(format string, args ...any) {
-	fmt.Printf(colorCyan+"→ "+colorReset+format+"\n", args...)
+	line := colorCyan + "→ " + colorReset + fmt.Sprintf(format, args...)
+	if uiProg != nil {
+		uiProg.Send(msgLog{text: line})
+	} else {
+		fmt.Println(line)
+	}
 }
 
 // ---- sequential pipeline (rip all, then encode all) ----
@@ -426,7 +551,7 @@ func (r *Ripper) runSequential(ctx context.Context, titles []makemkv.Title, meta
 		label := episodeLabel(i, isTV, r.opts.Season, r.opts.EpisodeStart, title)
 		printInfo("[%d/%d] Ripping %s…", i+1, len(titles), label)
 
-		pb := newBar(fmt.Sprintf("Rip  %s", label))
+		pb := newBar(slotRip, fmt.Sprintf("Rip  %s", label))
 		err := makemkv.RipTitle(ctx, r.cfg.DiscPath, title.ID, titleDir,
 			func(frac float64, _ string) {
 				if frac >= 0 {

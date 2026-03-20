@@ -137,7 +137,7 @@ func parseScanLine(line string, info *DiscInfo, titles map[int]*Title) {
 // RipTitle runs `makemkvcon mkv` to extract a single title.
 // progressFn is called with a 0..1 fraction; negative fraction signals a caption-only update.
 func RipTitle(ctx context.Context, disc string, titleID int, outputDir string, progressFn func(frac float64, caption string), debug bool) error {
-	args := []string{"-r", "--robot", "mkv", disc, strconv.Itoa(titleID), outputDir}
+	args := []string{"-r", "mkv", disc, strconv.Itoa(titleID), outputDir}
 	cmd := exec.CommandContext(ctx, "makemkvcon", args...)
 
 	stdout, err := cmd.StdoutPipe()
