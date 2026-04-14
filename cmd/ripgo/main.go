@@ -56,6 +56,7 @@ func main() {
 		Sequential:   opts.sequential,
 		KeepCache:    opts.keepCache,
 		ForceClean:   opts.forceClean,
+		Profile:      opts.profile,
 		Debug:        opts.debug,
 	})
 
@@ -78,6 +79,7 @@ type cliOptions struct {
 	sequential   bool
 	keepCache    bool
 	forceClean   bool
+	profile      string
 	debug        bool
 }
 
@@ -102,6 +104,7 @@ func parseArgs(args []string) (*cliOptions, error) {
 		sequential   = fs.Bool("sequential", false, "Disable parallel rip+encode pipeline")
 		keepCache    = fs.Bool("keep-cache", false, "Don't delete cache after successful rip+encode")
 		forceClean   = fs.Bool("force-clean", false, "Clean cache directory if not empty at startup")
+		profile      = fs.String("profile", "", "Encoding profile name (defined in config file)")
 		debug        = fs.Bool("debug", false, "Enable verbose debug output")
 		showVersion  = fs.Bool("version", false, "Show version")
 	)
@@ -154,6 +157,7 @@ func parseArgs(args []string) (*cliOptions, error) {
 		sequential:   *sequential,
 		keepCache:    *keepCache,
 		forceClean:   *forceClean,
+		profile:      *profile,
 		debug:        *debug,
 	}, nil
 }
@@ -186,6 +190,7 @@ OPTIONS:
     --sequential               Disable parallel rip+encode pipeline
     --keep-cache               Don't delete cache after successful rip+encode
     --force-clean              Clean cache directory if not empty at startup
+    --profile <name>           Encoding profile name (defined in config file)
     --debug                    Enable verbose debug output
     -v, --version              Show version
     -h, --help                 Show this help

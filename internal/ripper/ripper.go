@@ -31,6 +31,7 @@ type Options struct {
 	Sequential   bool
 	KeepCache    bool
 	ForceClean   bool
+	Profile      string // encoding profile name; empty = use first profile
 	Debug        bool
 }
 
@@ -112,6 +113,12 @@ func (r *Ripper) Run(ctx context.Context) error {
 		printOK("Metadata: %s (%d)", meta.Title, meta.Year)
 	}
 
+	profile, err := r.resolveProfile()
+	if err != nil {
+		return err
+	}
+	printInfo("Encoding profile: %s", profile.Name)
+
 	// ---- Phase 2: rip+encode with bubbletea TUI ----
 
 	p := tea.NewProgram(uiModel{}, tea.WithOutput(os.Stdout))
@@ -120,9 +127,9 @@ func (r *Ripper) Run(ctx context.Context) error {
 	go func() {
 		var workErr error
 		if r.opts.Sequential {
-			workErr = r.runSequential(ctx, titles, meta, isTV, tempDir, metaCfg)
+			workErr = r.runSequential(ctx, titles, meta, isTV, tempDir, metaCfg, profile)
 		} else {
-			workErr = r.runParallel(ctx, titles, meta, isTV, tempDir, metaCfg)
+			workErr = r.runParallel(ctx, titles, meta, isTV, tempDir, metaCfg, profile)
 		}
 		p.Send(msgQuit{err: workErr})
 	}()
@@ -155,7 +162,7 @@ type ripJob struct {
 	rippedPath string
 }
 
-func (r *Ripper) runParallel(ctx context.Context, titles []makemkv.Title, meta *metadata.Info, isTV bool, tempDir string, metaCfg metadata.Config) error {
+func (r *Ripper) runParallel(ctx context.Context, titles []makemkv.Title, meta *metadata.Info, isTV bool, tempDir string, metaCfg metadata.Config, profile config.EncodingProfile) error {
 	if uiProg != nil {
 		uiProg.Send(msgOverallInit{totalSteps: len(titles) * 2})
 	}
@@ -173,7 +180,7 @@ func (r *Ripper) runParallel(ctx context.Context, titles []makemkv.Title, meta *
 			if ctx.Err() != nil {
 				return
 			}
-			if err := r.encodeOne(ctx, job, meta, isTV, r.opts.Output, metaCfg); err != nil {
+			if err := r.encodeOne(ctx, job, meta, isTV, r.opts.Output, metaCfg, profile); err != nil {
 				mu.Lock()
 				encErrs = append(encErrs, err.Error())
 				mu.Unlock()
@@ -232,7 +239,7 @@ func (r *Ripper) runParallel(ctx context.Context, titles []makemkv.Title, meta *
 
 // ---- per-title encoding + naming ----
 
-func (r *Ripper) encodeOne(ctx context.Context, job ripJob, meta *metadata.Info, isTV bool, outputDir string, metaCfg metadata.Config) error {
+func (r *Ripper) encodeOne(ctx context.Context, job ripJob, meta *metadata.Info, isTV bool, outputDir string, metaCfg metadata.Config, profile config.EncodingProfile) error {
 	label := episodeLabel(job.index, isTV, r.opts.Season, r.opts.EpisodeStart, job.title)
 	printInfo("Encoding %s…", label)
 
@@ -251,6 +258,14 @@ func (r *Ripper) encodeOne(ctx context.Context, job ripJob, meta *metadata.Info,
 		Subtitles:     r.cfg.Subtitles,
 		StereoAudio:   r.cfg.StereoAudio,
 		SurroundAudio: r.cfg.SurroundAudio,
+		Profile: encoder.VideoProfile{
+			Name:        profile.Name,
+			Codec:       profile.Codec,
+			CRF:         profile.CRF,
+			Preset:      profile.Preset,
+			PixFmt:      profile.PixFmt,
+			VideoFilter: profile.VideoFilter,
+		},
 	}
 
 	pb := newBar(slotEnc, fmt.Sprintf("Enc  %s", label))
@@ -301,6 +316,27 @@ func (r *Ripper) prepareTempDir() (dir string, autoCreated bool, err error) {
 		return "", false, fmt.Errorf("creating temp dir: %w", err)
 	}
 	return dir, true, nil
+}
+
+// ---- profile resolution ----
+
+func (r *Ripper) resolveProfile() (config.EncodingProfile, error) {
+	if len(r.cfg.EncodingProfiles) == 0 {
+		return config.EncodingProfile{}, fmt.Errorf("no encoding profiles defined in config")
+	}
+	if r.opts.Profile == "" {
+		return r.cfg.EncodingProfiles[0], nil
+	}
+	for _, p := range r.cfg.EncodingProfiles {
+		if p.Name == r.opts.Profile {
+			return p, nil
+		}
+	}
+	names := make([]string, len(r.cfg.EncodingProfiles))
+	for i, p := range r.cfg.EncodingProfiles {
+		names[i] = p.Name
+	}
+	return config.EncodingProfile{}, fmt.Errorf("unknown profile %q (available: %s)", r.opts.Profile, strings.Join(names, ", "))
 }
 
 // ---- content type resolution ----
@@ -751,7 +787,7 @@ func printInfo(format string, args ...any) {
 
 // ---- sequential pipeline (rip all, then encode all) ----
 
-func (r *Ripper) runSequential(ctx context.Context, titles []makemkv.Title, meta *metadata.Info, isTV bool, tempDir string, metaCfg metadata.Config) error {
+func (r *Ripper) runSequential(ctx context.Context, titles []makemkv.Title, meta *metadata.Info, isTV bool, tempDir string, metaCfg metadata.Config, profile config.EncodingProfile) error {
 	if uiProg != nil {
 		uiProg.Send(msgOverallInit{totalSteps: len(titles) * 2})
 	}
@@ -798,7 +834,7 @@ func (r *Ripper) runSequential(ctx context.Context, titles []makemkv.Title, meta
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := r.encodeOne(ctx, job, meta, isTV, r.opts.Output, metaCfg); err != nil {
+		if err := r.encodeOne(ctx, job, meta, isTV, r.opts.Output, metaCfg, profile); err != nil {
 			return err
 		}
 	}

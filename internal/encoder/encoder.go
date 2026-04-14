@@ -28,12 +28,23 @@ type FileInfo struct {
 	Streams  []Stream
 }
 
-// EncodeSettings controls which streams are included and how audio is handled.
+// VideoProfile defines ffmpeg video encoding parameters.
+type VideoProfile struct {
+	Name        string
+	Codec       string // e.g. "libx264", "libx265"
+	CRF         int    // constant rate factor, e.g. 22
+	Preset      string // e.g. "slow", "medium"
+	PixFmt      string // e.g. "yuv420p"
+	VideoFilter string // value for -vf flag; empty = no filter
+}
+
+// EncodeSettings controls which streams are included and how audio and video are handled.
 type EncodeSettings struct {
 	Languages     []string
 	Subtitles     bool
 	StereoAudio   bool
 	SurroundAudio bool
+	Profile       VideoProfile
 }
 
 // Analyze runs ffprobe on path and returns stream information.
@@ -96,7 +107,7 @@ func Encode(ctx context.Context, inputFile, outputFile string, settings EncodeSe
 	}
 
 	selected := selectStreams(info.Streams, settings)
-	args := buildArgs(inputFile, outputFile, selected)
+	args := buildArgs(inputFile, outputFile, selected, settings.Profile)
 
 	if debug {
 		fmt.Fprintf(os.Stderr, "[ffmpeg] %s\n", strings.Join(args, " "))
@@ -185,7 +196,7 @@ func selectStreams(streams []Stream, s EncodeSettings) []Stream {
 	return selected
 }
 
-func buildArgs(input, output string, streams []Stream) []string {
+func buildArgs(input, output string, streams []Stream, profile VideoProfile) []string {
 	args := []string{
 		"-probesize", "400M",
 		"-analyzeduration", "400M",
@@ -198,14 +209,16 @@ func buildArgs(input, output string, streams []Stream) []string {
 	}
 	args = append(args, "-map_chapters", "0")
 
-	// Video: x264, slow preset, CRF 22, deinterlace
+	// Video: parameters from profile
 	args = append(args,
-		"-c:v", "libx264",
-		"-preset", "slow",
-		"-crf", "22",
-		"-pix_fmt", "yuv420p",
-		"-vf", "bwdif=mode=send_frame:parity=auto:deint=interlaced",
+		"-c:v", profile.Codec,
+		"-preset", profile.Preset,
+		"-crf", strconv.Itoa(profile.CRF),
+		"-pix_fmt", profile.PixFmt,
 	)
+	if profile.VideoFilter != "" {
+		args = append(args, "-vf", profile.VideoFilter)
+	}
 
 	// Audio: copy compatible codecs, transcode others to AAC; detect subtitles in same pass
 	audioIdx := 0

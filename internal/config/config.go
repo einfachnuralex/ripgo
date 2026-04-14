@@ -10,6 +10,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// EncodingProfile defines named ffmpeg video encoding parameters.
+type EncodingProfile struct {
+	Name        string
+	Codec       string
+	CRF         int
+	Preset      string
+	PixFmt      string
+	VideoFilter string
+}
+
 // rawConfig mirrors the structure of the YAML config file.
 type rawConfig struct {
 	Disc struct {
@@ -30,6 +40,14 @@ type rawConfig struct {
 		MinMovieDuration     int      `yaml:"min_movie_duration_seconds"`
 		MinEpisodeDuration   int      `yaml:"min_episode_duration_seconds"`
 		MaxEpisodeDuration   int      `yaml:"max_episode_duration_seconds"`
+		Profiles             []struct {
+			Name        string `yaml:"name"`
+			Codec       string `yaml:"codec"`
+			CRF         int    `yaml:"crf"`
+			Preset      string `yaml:"preset"`
+			PixFmt      string `yaml:"pix_fmt"`
+			VideoFilter string `yaml:"video_filter"`
+		} `yaml:"profiles"`
 	} `yaml:"encoding"`
 
 	Metadata struct {
@@ -57,6 +75,7 @@ type Config struct {
 	TMDBKey            string
 	OMDBKey            string
 	TVDBKey            string
+	EncodingProfiles   []EncodingProfile
 }
 
 // Defaults returns a Config with sensible default values.
@@ -70,6 +89,16 @@ func Defaults() *Config {
 		MinEpisodeDuration: 1200, // 20 min
 		MaxEpisodeDuration: 3600, // 60 min
 		MetadataEnabled:    true,
+		EncodingProfiles: []EncodingProfile{
+			{
+				Name:        "h264_crf22_slow",
+				Codec:       "libx264",
+				CRF:         22,
+				Preset:      "slow",
+				PixFmt:      "yuv420p",
+				VideoFilter: "bwdif=mode=send_frame:parity=auto:deint=interlaced",
+			},
+		},
 	}
 }
 
@@ -119,6 +148,19 @@ func Load() (*Config, error) {
 	}
 	if raw.Encoding.MaxEpisodeDuration > 0 {
 		cfg.MaxEpisodeDuration = raw.Encoding.MaxEpisodeDuration
+	}
+	if len(raw.Encoding.Profiles) > 0 {
+		cfg.EncodingProfiles = make([]EncodingProfile, len(raw.Encoding.Profiles))
+		for i, p := range raw.Encoding.Profiles {
+			cfg.EncodingProfiles[i] = EncodingProfile{
+				Name:        p.Name,
+				Codec:       p.Codec,
+				CRF:         p.CRF,
+				Preset:      p.Preset,
+				PixFmt:      p.PixFmt,
+				VideoFilter: p.VideoFilter,
+			}
+		}
 	}
 	cfg.MetadataEnabled = raw.Metadata.LookupEnabled
 	cfg.TMDBKey = raw.Metadata.TMDBKey
