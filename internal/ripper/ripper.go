@@ -265,6 +265,8 @@ func (r *Ripper) encodeOne(ctx context.Context, job ripJob, meta *metadata.Info,
 			Preset:      profile.Preset,
 			PixFmt:      profile.PixFmt,
 			VideoFilter: profile.VideoFilter,
+			HWDevice:    profile.HWDevice,
+			ExtraArgs:   profile.ExtraArgs,
 		},
 	}
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,14 +11,19 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ErrNoConfig is returned by Load when no config file is found in any search path.
+var ErrNoConfig = errors.New("no config file found")
+
 // EncodingProfile defines named ffmpeg video encoding parameters.
 type EncodingProfile struct {
 	Name        string
 	Codec       string
-	CRF         int
-	Preset      string
-	PixFmt      string
-	VideoFilter string
+	CRF         int      // 0 = omit quality flag
+	Preset      string   // empty = omit -preset
+	PixFmt      string   // empty = omit -pix_fmt
+	VideoFilter string   // empty = omit -vf
+	HWDevice    string   // hardware device path, e.g. "/dev/dri/renderD128"
+	ExtraArgs   []string // arbitrary extra ffmpeg flags
 }
 
 // rawConfig mirrors the structure of the YAML config file.
@@ -41,12 +47,14 @@ type rawConfig struct {
 		MinEpisodeDuration   int      `yaml:"min_episode_duration_seconds"`
 		MaxEpisodeDuration   int      `yaml:"max_episode_duration_seconds"`
 		Profiles             []struct {
-			Name        string `yaml:"name"`
-			Codec       string `yaml:"codec"`
-			CRF         int    `yaml:"crf"`
-			Preset      string `yaml:"preset"`
-			PixFmt      string `yaml:"pix_fmt"`
-			VideoFilter string `yaml:"video_filter"`
+			Name        string   `yaml:"name"`
+			Codec       string   `yaml:"codec"`
+			CRF         int      `yaml:"crf"`
+			Preset      string   `yaml:"preset"`
+			PixFmt      string   `yaml:"pix_fmt"`
+			VideoFilter string   `yaml:"video_filter"`
+			HWDevice    string   `yaml:"hw_device"`
+			ExtraArgs   []string `yaml:"extra_args"`
 		} `yaml:"profiles"`
 	} `yaml:"encoding"`
 
@@ -103,21 +111,23 @@ func Defaults() *Config {
 }
 
 // Load finds and parses the config file, then applies environment variable overrides.
-func Load() (*Config, error) {
+// Returns the path of the loaded file alongside the config.
+// Returns ErrNoConfig if no config file is found in any search path.
+func Load() (*Config, string, error) {
 	path, err := findFile()
 	if err != nil {
-		return nil, err
+		return nil, "", ErrNoConfig
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading config %s: %w", path, err)
+		return nil, "", fmt.Errorf("reading config %s: %w", path, err)
 	}
 
 	var raw rawConfig
 
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parsing config %s: %w", path, err)
+		return nil, "", fmt.Errorf("parsing config %s: %w", path, err)
 	}
 
 	cfg := Defaults()
@@ -159,6 +169,8 @@ func Load() (*Config, error) {
 				Preset:      p.Preset,
 				PixFmt:      p.PixFmt,
 				VideoFilter: p.VideoFilter,
+				HWDevice:    p.HWDevice,
+				ExtraArgs:   p.ExtraArgs,
 			}
 		}
 	}
@@ -178,7 +190,7 @@ func Load() (*Config, error) {
 		cfg.TVDBKey = v
 	}
 
-	return cfg, nil
+	return cfg, path, nil
 }
 
 func findFile() (string, error) {

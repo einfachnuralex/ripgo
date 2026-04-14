@@ -24,8 +24,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
+	cfg, cfgPath, err := config.Load()
+	switch {
+	case err == nil:
+		fmt.Printf("\033[36m→\033[0m Config: %s\n", cfgPath)
+	case errors.Is(err, config.ErrNoConfig):
+		cfg = config.Defaults()
+	default:
+		fmt.Fprintf(os.Stderr, "\033[33m⚠\033[0m Config konnte nicht geladen werden: %v\n", err)
 		cfg = config.Defaults()
 	}
 

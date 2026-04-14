@@ -31,11 +31,13 @@ type FileInfo struct {
 // VideoProfile defines ffmpeg video encoding parameters.
 type VideoProfile struct {
 	Name        string
-	Codec       string // e.g. "libx264", "libx265"
-	CRF         int    // constant rate factor, e.g. 22
-	Preset      string // e.g. "slow", "medium"
-	PixFmt      string // e.g. "yuv420p"
-	VideoFilter string // value for -vf flag; empty = no filter
+	Codec       string   // e.g. "libx264", "libx265", "hevc_vaapi"
+	CRF         int      // quality value; 0 = omit quality flag
+	Preset      string   // e.g. "slow", "medium"; empty = omit -preset
+	PixFmt      string   // e.g. "yuv420p"; empty = omit -pix_fmt
+	VideoFilter string   // value for -vf flag; empty = no filter
+	HWDevice    string   // hardware device path, e.g. "/dev/dri/renderD128"; produces -vaapi_device before -i
+	ExtraArgs   []string // arbitrary extra ffmpeg flags appended after codec args
 }
 
 // EncodeSettings controls which streams are included and how audio and video are handled.
@@ -196,12 +198,23 @@ func selectStreams(streams []Stream, s EncodeSettings) []Stream {
 	return selected
 }
 
-func buildArgs(input, output string, streams []Stream, profile VideoProfile) []string {
-	args := []string{
-		"-probesize", "400M",
-		"-analyzeduration", "400M",
-		"-i", input,
+// qualityFlagForCodec returns the appropriate ffmpeg quality flag for the given codec.
+// VAAPI encoders use -global_quality; all others use -crf.
+func qualityFlagForCodec(codec string) string {
+	if strings.HasSuffix(strings.ToLower(codec), "_vaapi") {
+		return "global_quality"
 	}
+	return "crf"
+}
+
+func buildArgs(input, output string, streams []Stream, profile VideoProfile) []string {
+	args := []string{"-probesize", "400M", "-analyzeduration", "400M"}
+
+	// Hardware device must precede -i (required for VAAPI etc.)
+	if profile.HWDevice != "" {
+		args = append(args, "-vaapi_device", profile.HWDevice)
+	}
+	args = append(args, "-i", input)
 
 	// Map selected streams
 	for _, s := range streams {
@@ -209,16 +222,27 @@ func buildArgs(input, output string, streams []Stream, profile VideoProfile) []s
 	}
 	args = append(args, "-map_chapters", "0")
 
-	// Video: parameters from profile
-	args = append(args,
-		"-c:v", profile.Codec,
-		"-preset", profile.Preset,
-		"-crf", strconv.Itoa(profile.CRF),
-		"-pix_fmt", profile.PixFmt,
-	)
+	// Video codec (always required)
+	args = append(args, "-c:v", profile.Codec)
+
+	// Quality: CRF=0 means omit; flag name depends on codec family
+	if profile.CRF > 0 {
+		args = append(args, "-"+qualityFlagForCodec(profile.Codec), strconv.Itoa(profile.CRF))
+	}
+	// Preset optional
+	if profile.Preset != "" {
+		args = append(args, "-preset", profile.Preset)
+	}
+	// Pixel format optional
+	if profile.PixFmt != "" {
+		args = append(args, "-pix_fmt", profile.PixFmt)
+	}
+	// Video filter optional
 	if profile.VideoFilter != "" {
 		args = append(args, "-vf", profile.VideoFilter)
 	}
+	// Extra args appended after standard codec args
+	args = append(args, profile.ExtraArgs...)
 
 	// Audio: copy compatible codecs, transcode others to AAC; detect subtitles in same pass
 	audioIdx := 0

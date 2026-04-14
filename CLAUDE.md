@@ -101,7 +101,14 @@ encoding:
       crf: 24
       preset: medium
       pix_fmt: yuv420p10le
-      video_filter: ""
+    - name: hevc_vaapi_qp23
+      codec: hevc_vaapi
+      crf: 23
+    - name: hevc_vaapi_qp23_explicit
+      codec: hevc_vaapi
+      crf: 23
+      hw_device: /dev/dri/renderD128
+      video_filter: "format=nv12,hwupload"
 
 metadata:
   lookup_enabled: true
@@ -121,11 +128,15 @@ Profiles are defined in the config file under `encoding.profiles`. Each profile 
 | Field | YAML key | Description |
 |-------|----------|-------------|
 | Name | `name` | Identifier used with `--profile` |
-| Codec | `codec` | FFmpeg video codec (e.g. `libx264`, `libx265`) |
-| CRF | `crf` | Constant Rate Factor |
-| Preset | `preset` | Encoder speed/quality preset |
-| PixFmt | `pix_fmt` | Pixel format (e.g. `yuv420p`, `yuv420p10le`) |
+| Codec | `codec` | FFmpeg video codec (e.g. `libx264`, `libx265`, `hevc_vaapi`) |
+| CRF | `crf` | Quality value; `0` = omit quality flag entirely |
+| Preset | `preset` | Encoder speed/quality preset; empty = omit `-preset` |
+| PixFmt | `pix_fmt` | Pixel format (e.g. `yuv420p`); empty = omit `-pix_fmt` |
 | VideoFilter | `video_filter` | Value passed to `-vf`; empty = no filter |
+| HWDevice | `hw_device` | Hardware device path (e.g. `/dev/dri/renderD128`); produces `-vaapi_device` before `-i` |
+| ExtraArgs | `extra_args` | List of arbitrary extra ffmpeg flags appended after codec args |
+
+**Quality flag auto-detection:** codecs ending in `_vaapi` (e.g. `hevc_vaapi`, `h264_vaapi`) use `-global_quality` instead of `-crf`. All other codecs use `-crf`.
 
 Without `--profile`, the first defined profile is used. Unknown profile names produce an error listing available names.
 
