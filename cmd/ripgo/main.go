@@ -54,6 +54,8 @@ func main() {
 		EpisodeStart: opts.episodeStart,
 		DiscType:     opts.discType,
 		Sequential:   opts.sequential,
+		KeepCache:    opts.keepCache,
+		ForceClean:   opts.forceClean,
 		Debug:        opts.debug,
 	})
 
@@ -74,6 +76,8 @@ type cliOptions struct {
 	episodeStart int
 	discType     string
 	sequential   bool
+	keepCache    bool
+	forceClean   bool
 	debug        bool
 }
 
@@ -96,6 +100,8 @@ func parseArgs(args []string) (*cliOptions, error) {
 		episodeStart = fs.Int("episode-start", 1, "Starting episode number")
 		discType     = fs.String("disc-type", "", "Override disc type: dvd, bd, uhd")
 		sequential   = fs.Bool("sequential", false, "Disable parallel rip+encode pipeline")
+		keepCache    = fs.Bool("keep-cache", false, "Don't delete cache after successful rip+encode")
+		forceClean   = fs.Bool("force-clean", false, "Clean cache directory if not empty at startup")
 		debug        = fs.Bool("debug", false, "Enable verbose debug output")
 		showVersion  = fs.Bool("version", false, "Show version")
 	)
@@ -146,6 +152,8 @@ func parseArgs(args []string) (*cliOptions, error) {
 		episodeStart: *episodeStart,
 		discType:     *discType,
 		sequential:   *sequential,
+		keepCache:    *keepCache,
+		forceClean:   *forceClean,
 		debug:        *debug,
 	}, nil
 }
@@ -176,6 +184,8 @@ OPTIONS:
     --episode-start <n>        Starting episode number (default: 1)
     --disc-type <type>         Override disc type: dvd, bd, uhd
     --sequential               Disable parallel rip+encode pipeline
+    --keep-cache               Don't delete cache after successful rip+encode
+    --force-clean              Clean cache directory if not empty at startup
     --debug                    Enable verbose debug output
     -v, --version              Show version
     -h, --help                 Show this help

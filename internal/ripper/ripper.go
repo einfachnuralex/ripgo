@@ -29,6 +29,8 @@ type Options struct {
 	EpisodeStart int
 	DiscType     string
 	Sequential   bool
+	KeepCache    bool
+	ForceClean   bool
 	Debug        bool
 }
 
@@ -56,6 +58,7 @@ func (r *Ripper) Run(ctx context.Context) error {
 	if autoTemp {
 		defer os.RemoveAll(tempDir)
 	}
+	printInfo("Cache directory: %s", tempDir)
 
 	// ---- Phase 1: scan/detect/metadata (plain stdout, no TUI) ----
 
@@ -129,7 +132,19 @@ func (r *Ripper) Run(ctx context.Context) error {
 	if runErr != nil {
 		return fmt.Errorf("tui: %w", runErr)
 	}
-	return finalModel.(uiModel).workErr
+
+	workErr := finalModel.(uiModel).workErr
+
+	// Clean up user-specified cache on success (auto-temp handled by defer above)
+	if !autoTemp && workErr == nil && !r.opts.KeepCache {
+		if err := os.RemoveAll(tempDir); err != nil {
+			printWarn("Failed to clean cache: %v", err)
+		} else {
+			printOK("Cleaned cache directory %s", tempDir)
+		}
+	}
+
+	return workErr
 }
 
 // ---- parallel pipeline (rip → encode concurrently) ----
@@ -259,7 +274,26 @@ func (r *Ripper) prepareTempDir() (dir string, autoCreated bool, err error) {
 		if err := os.MkdirAll(r.cfg.TempDir, 0o755); err != nil {
 			return "", false, fmt.Errorf("creating temp dir: %w", err)
 		}
-		return r.cfg.TempDir, false, nil
+
+		entries, err := os.ReadDir(r.cfg.TempDir)
+		if err != nil {
+			return "", false, fmt.Errorf("reading cache dir: %w", err)
+		}
+		if len(entries) > 0 {
+			if !r.opts.ForceClean {
+				return "", false, fmt.Errorf("cache directory %s is not empty (use --force-clean to clear)", r.cfg.TempDir)
+			}
+			for _, e := range entries {
+				os.RemoveAll(filepath.Join(r.cfg.TempDir, e.Name()))
+			}
+			printInfo("Cleaned cache directory %s", r.cfg.TempDir)
+		}
+
+		stamped := filepath.Join(r.cfg.TempDir, time.Now().Format("20060102-150405"))
+		if err := os.MkdirAll(stamped, 0o755); err != nil {
+			return "", false, fmt.Errorf("creating timestamped cache dir: %w", err)
+		}
+		return stamped, false, nil
 	}
 
 	dir, err = os.MkdirTemp("", "ripgo-")
