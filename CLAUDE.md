@@ -101,10 +101,8 @@ encoding:
       crf: 24
       preset: medium
       pix_fmt: yuv420p10le
+    # VAAPI: hw_device + video_filter are required (see "VAAPI notes" below)
     - name: hevc_vaapi_qp23
-      codec: hevc_vaapi
-      crf: 23
-    - name: hevc_vaapi_qp23_explicit
       codec: hevc_vaapi
       crf: 23
       hw_device: /dev/dri/renderD128
@@ -118,6 +116,11 @@ metadata:
 ```
 
 Environment variables `TMDB_API_KEY`, `OMDB_API_KEY`, `TVDB_API_KEY` override the config file values.
+
+At startup, `main.go` calls `config.Load()` which returns `(*Config, string, error)` and a sentinel `config.ErrNoConfig` for the "not found" case:
+- Config found and valid → prints `→ Config: <path>` before scanning
+- No config file anywhere → silently uses `config.Defaults()` (no output)
+- Config file found but broken → prints a warning on stderr, then uses `config.Defaults()`
 
 If no config file is found, `config.Defaults()` is used. The built-in default profile is `h264_crf22_slow` (libx264, CRF 22, slow preset, yuv420p, bwdif deinterlace).
 
@@ -137,6 +140,8 @@ Profiles are defined in the config file under `encoding.profiles`. Each profile 
 | ExtraArgs | `extra_args` | List of arbitrary extra ffmpeg flags appended after codec args |
 
 **Quality flag auto-detection:** codecs ending in `_vaapi` (e.g. `hevc_vaapi`, `h264_vaapi`) use `-global_quality` instead of `-crf`. All other codecs use `-crf`.
+
+**VAAPI notes:** `hw_device` and `video_filter: "format=nv12,hwupload"` are **required** for VAAPI encoders to work. Without `hwupload`, ffmpeg receives CPU-resident frames and cannot pass them to the VAAPI encoder — resulting in `exit status 218`. Available devices: `ls /dev/dri/`.
 
 Without `--profile`, the first defined profile is used. Unknown profile names produce an error listing available names.
 
@@ -179,3 +184,4 @@ No code generation. No external test fixtures needed for `go build`.
 - **Import cycle prevention**: `config` defines `EncodingProfile`; `encoder` defines `VideoProfile`. Conversion happens in `ripper` which imports both.
 - **makemkvcon exit code**: it returns non-zero even on success; the scan only fails if both `disc.Name` and `titles` are empty after parsing.
 - **Audio codec handling**: AAC, AC3, EAC3 are stream-copied; everything else is transcoded to AAC 160k. Stream selection is per-language and per-channel-count (stereo ≤2ch, surround >2ch).
+- **ffmpeg error output**: stderr is piped and consumed for progress parsing (`out_time_us=`). Non-progress lines (actual errors) are only forwarded to the user when `--debug` is set. Without `--debug`, encoding failures show only the exit code (e.g. `exit status 218`) with no human-readable message. This is a known gap.
