@@ -10,7 +10,8 @@ internal/config/config.go      YAML config loading + defaults
 internal/makemkv/makemkv.go    MakeMKV wrapper (scan + rip)
 internal/encoder/encoder.go    FFmpeg wrapper (probe + encode)
 internal/metadata/metadata.go  TMDB / OMDB / TVDB lookups
-internal/ripper/ripper.go      Orchestration, pipeline, TUI
+internal/ripper/ripper.go      Orchestration, pipeline, TUI, dry run
+internal/shellquote/           POSIX shell quoting for printed commands
 ```
 
 ## Prerequisites
@@ -163,10 +164,19 @@ The type chain: `config.EncodingProfile` (config package) → converted to `enco
 --keep-cache               Don't delete cache after successful rip+encode
 --force-clean              Clean cache directory if not empty at startup
 --profile <name>           Encoding profile name (defined in config file)
---debug                    Verbose output: MakeMKV lines + ffmpeg command
+--debug                    Verbose output: MakeMKV lines + makemkvcon/ffmpeg commands
+--dry-run                  Scan + metadata only; print all commands instead of running them
 -v, --version              Show version
 -h, --help                 Show help
 ```
+
+## Dry run (`--dry-run`)
+
+Runs Phase 1 for real (disc scan, TV/movie detection incl. prompt, metadata + episode titles, profile), then prints the commands a real run would execute as a commented shell script on stdout (`Ripper.printDryRun`). Nothing is created, deleted, ripped or encoded; no TUI. A non-empty cache dir only produces a warning. Only `makemkvcon` is required in PATH.
+
+- Command args come from the same functions the real run uses: `makemkv.ScanArgs` / `makemkv.RipArgs`, `encoder.ProbeArgs` / `encoder.BuildArgs`. All are quoted with `shellquote.Join`.
+- `encoder.BuildArgs` excludes `-progress pipe:2`; `Encode` prepends it, the dry run prepends `-stats` instead (shows progress despite `-loglevel warning`).
+- **Stream mapping is a prediction**: the real run selects streams via ffprobe on the ripped file, which doesn't exist yet. The dry run uses the `SINFO` stream info from the scan (`Title.Streams`; attr 1 type, 3 lang, 5 codec id → normalized to ffprobe names, 14 channels, 19 `WxH`). Indices can differ if MakeMKV selects other streams, so the ffprobe command is printed too. The ripped file name comes from `TINFO` 27 (`Title.FileName`).
 
 ## Build
 
@@ -175,7 +185,7 @@ go build ./...
 go build -o ripgo ./cmd/ripgo
 ```
 
-No code generation. No external test fixtures needed for `go build`.
+No code generation. No external test fixtures needed for `go build`. Unit tests: `go test ./...` (shellquote, SINFO parsing, ffmpeg args).
 
 ## Key design decisions
 

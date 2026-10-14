@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/einfachnuralex/ripgo/internal/shellquote"
 )
 
 // Stream describes a single media stream inside a file.
@@ -49,16 +51,20 @@ type EncodeSettings struct {
 	Profile       VideoProfile
 }
 
-// Analyze runs ffprobe on path and returns stream information.
-func Analyze(ctx context.Context, path string) (*FileInfo, error) {
-	args := []string{
+// ProbeArgs returns the ffprobe arguments used to analyze path.
+func ProbeArgs(path string) []string {
+	return []string{
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_streams",
 		"-show_format",
 		path,
 	}
-	out, err := exec.CommandContext(ctx, "ffprobe", args...).Output()
+}
+
+// Analyze runs ffprobe on path and returns stream information.
+func Analyze(ctx context.Context, path string) (*FileInfo, error) {
+	out, err := exec.CommandContext(ctx, "ffprobe", ProbeArgs(path)...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe: %w", err)
 	}
@@ -108,11 +114,11 @@ func Encode(ctx context.Context, inputFile, outputFile string, settings EncodeSe
 		return fmt.Errorf("analyzing %s: %w", inputFile, err)
 	}
 
-	selected := selectStreams(info.Streams, settings)
-	args := buildArgs(inputFile, outputFile, selected, settings.Profile)
+	// -progress is a global option; ripgo parses it from stderr
+	args := append([]string{"-progress", "pipe:2"}, BuildArgs(inputFile, outputFile, info.Streams, settings)...)
 
 	if debug {
-		fmt.Fprintf(os.Stderr, "[ffmpeg] %s\n", strings.Join(args, " "))
+		fmt.Fprintf(os.Stderr, "[ffmpeg] %s\n", shellquote.Join("ffmpeg", args...))
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
@@ -145,7 +151,14 @@ func Encode(ctx context.Context, inputFile, outputFile string, settings EncodeSe
 	return cmd.Wait()
 }
 
-func selectStreams(streams []Stream, s EncodeSettings) []Stream {
+// BuildArgs returns the ffmpeg arguments for encoding input to output, selecting
+// from streams according to settings. Progress reporting flags are not included.
+func BuildArgs(input, output string, streams []Stream, settings EncodeSettings) []string {
+	return buildArgs(input, output, SelectStreams(streams, settings), settings.Profile)
+}
+
+// SelectStreams returns the streams that will be mapped into the output file.
+func SelectStreams(streams []Stream, s EncodeSettings) []Stream {
 	langSet := make(map[string]bool, len(s.Languages))
 	for _, l := range s.Languages {
 		langSet[strings.ToLower(l)] = true
@@ -196,6 +209,16 @@ func selectStreams(streams []Stream, s EncodeSettings) []Stream {
 	}
 
 	return selected
+}
+
+// CopiesAudio reports whether an audio stream with the given codec is stream-copied
+// (true) or transcoded to AAC (false).
+func CopiesAudio(codec string) bool {
+	switch strings.ToLower(codec) {
+	case "aac", "ac3", "eac3":
+		return true
+	}
+	return false
 }
 
 // qualityFlagForCodec returns the appropriate ffmpeg quality flag for the given codec.
@@ -252,8 +275,7 @@ func buildArgs(input, output string, streams []Stream, profile VideoProfile) []s
 		switch s.Type {
 		case "audio":
 			hasAudio = true
-			codec := strings.ToLower(s.Codec)
-			if codec == "aac" || codec == "ac3" || codec == "eac3" {
+			if CopiesAudio(s.Codec) {
 				args = append(args, fmt.Sprintf("-c:a:%d", audioIdx), "copy")
 			} else {
 				args = append(args,
@@ -279,7 +301,6 @@ func buildArgs(input, output string, streams []Stream, profile VideoProfile) []s
 
 	args = append(args,
 		"-y",
-		"-progress", "pipe:2",
 		"-loglevel", "warning",
 		output,
 	)

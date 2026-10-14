@@ -43,7 +43,7 @@ func main() {
 		cfg.TempDir = opts.temp
 	}
 
-	if err := checkPrerequisites(); err != nil {
+	if err := checkPrerequisites(opts.dryRun); err != nil {
 		fmt.Fprintf(os.Stderr, "prerequisite check failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -64,6 +64,7 @@ func main() {
 		ForceClean:   opts.forceClean,
 		Profile:      opts.profile,
 		Debug:        opts.debug,
+		DryRun:       opts.dryRun,
 	})
 
 	if err := r.Run(ctx); err != nil {
@@ -87,6 +88,7 @@ type cliOptions struct {
 	forceClean   bool
 	profile      string
 	debug        bool
+	dryRun       bool
 }
 
 func parseArgs(args []string) (*cliOptions, error) {
@@ -112,6 +114,7 @@ func parseArgs(args []string) (*cliOptions, error) {
 		forceClean   = fs.Bool("force-clean", false, "Clean cache directory if not empty at startup")
 		profile      = fs.String("profile", "", "Encoding profile name (defined in config file)")
 		debug        = fs.Bool("debug", false, "Enable verbose debug output")
+		dryRun       = fs.Bool("dry-run", false, "Scan disc and print commands without ripping or encoding")
 		showVersion  = fs.Bool("version", false, "Show version")
 	)
 	fs.StringVar(output, "o", "", "Output directory (required)")
@@ -165,13 +168,22 @@ func parseArgs(args []string) (*cliOptions, error) {
 		forceClean:   *forceClean,
 		profile:      *profile,
 		debug:        *debug,
+		dryRun:       *dryRun,
 	}, nil
 }
 
-func checkPrerequisites() error {
-	for _, tool := range []string{"makemkvcon", "ffmpeg", "ffprobe"} {
+// checkPrerequisites verifies the external tools are in PATH.
+// A dry run only executes the disc scan, so ffmpeg/ffprobe are optional there.
+func checkPrerequisites(dryRun bool) error {
+	if _, err := exec.LookPath("makemkvcon"); err != nil {
+		return fmt.Errorf("makemkvcon not found in PATH")
+	}
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
 		if _, err := exec.LookPath(tool); err != nil {
-			return fmt.Errorf("%s not found in PATH", tool)
+			if !dryRun {
+				return fmt.Errorf("%s not found in PATH", tool)
+			}
+			fmt.Fprintf(os.Stderr, "\033[33m⚠\033[0m %s not found in PATH (not needed for --dry-run)\n", tool)
 		}
 	}
 	return nil
@@ -198,6 +210,8 @@ OPTIONS:
     --force-clean              Clean cache directory if not empty at startup
     --profile <name>           Encoding profile name (defined in config file)
     --debug                    Enable verbose debug output
+    --dry-run                  Scan disc and print makemkvcon/ffprobe/ffmpeg commands
+                               without ripping, encoding or creating directories
     -v, --version              Show version
     -h, --help                 Show this help
 
@@ -211,5 +225,6 @@ EXAMPLES:
     ripsharp --output ~/TV --mode tv --title "Breaking Bad" --season 2
     ripsharp --output ~/Movies --disc "file:/path/to/movie.iso"
     ripsharp --output ~/Movies --disc disc:1 --temp /tmp/rip
+    ripsharp --output ~/Movies --dry-run
 `, version)
 }

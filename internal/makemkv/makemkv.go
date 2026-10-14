@@ -11,14 +11,30 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/einfachnuralex/ripgo/internal/shellquote"
 )
 
 // Title represents a single track found on the disc.
 type Title struct {
 	ID       int
 	Name     string
-	Duration int   // seconds
-	Size     int64 // bytes reported by MakeMKV
+	FileName string // output file name MakeMKV will write (TINFO 27)
+	Duration int    // seconds
+	Size     int64  // bytes reported by MakeMKV
+	Streams  []Stream
+}
+
+// Stream describes a single stream of a title as reported by the scan (SINFO).
+// Codec uses ffprobe-style names (e.g. "ac3", "h264") so it can be fed to the encoder.
+type Stream struct {
+	Index    int
+	Type     string // "video", "audio", "subtitle"
+	Codec    string
+	Language string
+	Width    int
+	Height   int
+	Channels int
 }
 
 // DiscInfo holds the result of scanning a disc.
@@ -34,9 +50,19 @@ type Detection struct {
 	Confidence float64 // 0.0 - 1.0
 }
 
+// ScanArgs returns the makemkvcon arguments used to scan disc.
+func ScanArgs(disc string) []string {
+	return []string{"-r", "--robot", "info", disc}
+}
+
+// RipArgs returns the makemkvcon arguments used to rip titleID from disc into outputDir.
+func RipArgs(disc string, titleID int, outputDir string) []string {
+	return []string{"-r", "mkv", disc, strconv.Itoa(titleID), outputDir}
+}
+
 // ScanDisc runs `makemkvcon -r --robot info` and returns disc metadata.
 func ScanDisc(ctx context.Context, disc string, debug bool) (*DiscInfo, error) {
-	cmd := exec.CommandContext(ctx, "makemkvcon", "-r", "--robot", "info", disc)
+	cmd := exec.CommandContext(ctx, "makemkvcon", ScanArgs(disc)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("pipe: %w", err)
@@ -126,18 +152,109 @@ func parseScanLine(line string, info *DiscInfo, titles map[int]*Title) {
 		case 10: // size in bytes
 			t.Size, _ = strconv.ParseInt(val, 10, 64)
 		case 27: // output filename - use as name fallback
+			t.FileName = filepath.Base(val)
 			if t.Name == "" {
 				base := filepath.Base(val)
 				t.Name = strings.TrimSuffix(base, filepath.Ext(base))
 			}
 		}
+
+	case strings.HasPrefix(line, "SINFO:"):
+		// SINFO:titleID,streamID,attrID,code,"value"
+		parts := splitCSV(line[6:])
+		if len(parts) < 5 {
+			return
+		}
+		titleID, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return
+		}
+		streamID, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return
+		}
+		attrID, err := strconv.Atoi(parts[2])
+		if err != nil {
+			return
+		}
+		if titles[titleID] == nil {
+			titles[titleID] = &Title{ID: titleID}
+		}
+		t := titles[titleID]
+		for len(t.Streams) <= streamID {
+			t.Streams = append(t.Streams, Stream{Index: len(t.Streams)})
+		}
+		s := &t.Streams[streamID]
+		val := unquote(parts[4])
+		switch attrID {
+		case 1: // stream type
+			switch strings.ToLower(val) {
+			case "video":
+				s.Type = "video"
+			case "audio":
+				s.Type = "audio"
+			case "subtitles":
+				s.Type = "subtitle"
+			}
+		case 3: // language code
+			s.Language = val
+		case 5: // codec id, e.g. "A_AC3"
+			s.Codec = normalizeCodec(val)
+		case 14: // audio channel count
+			s.Channels, _ = strconv.Atoi(val)
+		case 19: // video size "WxH"
+			if w, h, ok := strings.Cut(val, "x"); ok {
+				s.Width, _ = strconv.Atoi(w)
+				s.Height, _ = strconv.Atoi(h)
+			}
+		}
 	}
+}
+
+// normalizeCodec maps a Matroska codec id as reported by MakeMKV to the
+// codec name ffprobe would report for the ripped file.
+func normalizeCodec(id string) string {
+	upper := strings.ToUpper(id)
+	switch {
+	case upper == "A_AC3":
+		return "ac3"
+	case upper == "A_EAC3":
+		return "eac3"
+	case strings.HasPrefix(upper, "A_AAC"):
+		return "aac"
+	case strings.HasPrefix(upper, "A_DTS"):
+		return "dts"
+	case upper == "A_TRUEHD":
+		return "truehd"
+	case upper == "A_FLAC":
+		return "flac"
+	case strings.HasPrefix(upper, "A_PCM"), upper == "A_LPCM":
+		return "pcm"
+	case strings.HasPrefix(upper, "A_MPEG"):
+		return "mp2"
+	case upper == "V_MPEG2":
+		return "mpeg2video"
+	case upper == "V_MPEG4/ISO/AVC":
+		return "h264"
+	case upper == "V_MPEGH/ISO/HEVC":
+		return "hevc"
+	case upper == "V_MS/VFW/WVC1":
+		return "vc1"
+	case upper == "S_VOBSUB":
+		return "dvd_subtitle"
+	case upper == "S_HDMV/PGS":
+		return "hdmv_pgs_subtitle"
+	}
+	return strings.ToLower(id)
 }
 
 // RipTitle runs `makemkvcon mkv` to extract a single title.
 // progressFn is called with a 0..1 fraction; negative fraction signals a caption-only update.
 func RipTitle(ctx context.Context, disc string, titleID int, outputDir string, progressFn func(frac float64, caption string), debug bool) error {
-	args := []string{"-r", "mkv", disc, strconv.Itoa(titleID), outputDir}
+	args := RipArgs(disc, titleID, outputDir)
+	if debug {
+		fmt.Fprintf(os.Stderr, "[makemkv rip] %s\n", shellquote.Join("makemkvcon", args...))
+	}
 	cmd := exec.CommandContext(ctx, "makemkvcon", args...)
 
 	stdout, err := cmd.StdoutPipe()

@@ -8,6 +8,7 @@ Branch `tui`. Letzte Arbeiten:
 - Konfigurierbare Encoding-Profile (`--profile`, `config.EncodingProfile` → `encoder.VideoProfile`)
 - VAAPI-Support: optionale Felder, `hw_device`, `extra_args`, Quality-Flag-Auto-Erkennung
 - Config-Feedback beim Start: `config.Load()` gibt Pfad zurück, druckt `→ Config: <pfad>` in Phase 1
+- `--dry-run` (2026-10-14): Phase 1 echt, danach Befehle (makemkvcon/ffprobe/ffmpeg) als kopierbares Shell-Skript statt Rip/Encode
 
 ---
 
@@ -91,14 +92,15 @@ CLI-Args
 
 ```
 main → config, ripper
-ripper → config, encoder, makemkv, metadata
-encoder → (nur stdlib)
+ripper → config, encoder, makemkv, metadata, shellquote
+encoder → shellquote
 config → (nur stdlib + yaml)
-makemkv → (nur stdlib)
+makemkv → shellquote
+shellquote → (nur stdlib)
 metadata → (nur stdlib)
 ```
 
-`config.EncodingProfile` und `encoder.VideoProfile` sind bewusst getrennte Typen. Konvertierung in `ripper.encodeOne()`.
+`config.EncodingProfile` und `encoder.VideoProfile` sind bewusst getrennte Typen. Konvertierung in `ripper.encodeSettings()` (genutzt von `encodeOne` und Dry Run). Ebenso `makemkv.Stream` → `encoder.Stream` im Dry Run.
 
 ---
 
@@ -114,6 +116,9 @@ metadata → (nur stdlib)
 | Zeitstempel-Unterordner | Verhindert, dass zwei gleichzeitige Programmstarts dieselben Roh-MKVs überschreiben |
 | Audio-Copy-Strategie | AAC/AC3/EAC3 stream-copy, alles andere → AAC 160k transcode |
 | `_vaapi`-Quality-Flag | Auto-Erkennung: `*_vaapi` → `-global_quality`, sonst `-crf` |
+| Dry-Run-Stream-Vorhersage aus SINFO | Gerippte MKV existiert im Dry Run noch nicht → `-map` aus Scan-Daten vorhergesagt (mit Hinweis), ffprobe-Befehl zusätzlich ausgegeben. Vom User so gewählt ("beides kombiniert") |
+| Ein Arg-Builder pro Befehl | `ScanArgs`/`RipArgs`/`ProbeArgs`/`BuildArgs` werden vom echten Lauf und vom Dry Run genutzt → ausgegebene Befehle können nicht auseinanderlaufen |
+| `-progress pipe:2` nicht in `BuildArgs` | Nur ripgo braucht es; `Encode` stellt es voran, Dry Run stellt `-stats` voran |
 
 ---
 
@@ -128,6 +133,10 @@ metadata → (nur stdlib)
 **Workaround:** `--debug` aktivieren.
 
 **Saubere Lösung:** Nicht-Progress-Zeilen in einem Ring-Buffer sammeln, bei `cmd.Wait()`-Fehler die letzten N Zeilen an den zurückgegebenen Fehler anhängen.
+
+### MakeMKV SINFO-Attribut-IDs (Dry-Run-Vorhersage)
+
+`SINFO:titleID,streamID,attrID,code,"value"` — 1 Typ (Video/Audio/Subtitles), 3 Sprachcode, 5 Codec-ID (`A_AC3` …, via `normalizeCodec` auf ffprobe-Namen), 14 Kanäle, 19 `WxH`. Streams, die MakeMKV beim Rip abwählt, verschieben die Indizes — deshalb nur Vorhersage. Nicht gegen eine echte Disc verifiziert, nur mit Stub-`makemkvcon`.
 
 ### VAAPI-Profile brauchen explizite Konfiguration
 

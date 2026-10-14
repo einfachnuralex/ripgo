@@ -17,6 +17,7 @@ import (
 	"github.com/einfachnuralex/ripgo/internal/encoder"
 	"github.com/einfachnuralex/ripgo/internal/makemkv"
 	"github.com/einfachnuralex/ripgo/internal/metadata"
+	"github.com/einfachnuralex/ripgo/internal/shellquote"
 )
 
 // Options carries the runtime parameters parsed from the CLI.
@@ -33,6 +34,7 @@ type Options struct {
 	ForceClean   bool
 	Profile      string // encoding profile name; empty = use first profile
 	Debug        bool
+	DryRun       bool // scan + metadata only; print commands instead of ripping/encoding
 }
 
 // Ripper orchestrates disc scanning, ripping, encoding, and file naming.
@@ -48,22 +50,33 @@ func New(cfg *config.Config, opts Options) *Ripper {
 
 // Run executes the full rip-and-encode pipeline.
 func (r *Ripper) Run(ctx context.Context) error {
-	if err := os.MkdirAll(r.opts.Output, 0o755); err != nil {
-		return fmt.Errorf("creating output dir: %w", err)
-	}
+	var tempDir string
+	var autoTemp bool
+	if r.opts.DryRun {
+		printWarn("Dry run: nothing will be ripped, encoded, created or deleted")
+		tempDir = r.plannedTempDir()
+	} else {
+		if err := os.MkdirAll(r.opts.Output, 0o755); err != nil {
+			return fmt.Errorf("creating output dir: %w", err)
+		}
 
-	tempDir, autoTemp, err := r.prepareTempDir()
-	if err != nil {
-		return err
-	}
-	if autoTemp {
-		defer os.RemoveAll(tempDir)
+		var err error
+		tempDir, autoTemp, err = r.prepareTempDir()
+		if err != nil {
+			return err
+		}
+		if autoTemp {
+			defer os.RemoveAll(tempDir)
+		}
 	}
 	printInfo("Cache directory: %s", tempDir)
 
 	// ---- Phase 1: scan/detect/metadata (plain stdout, no TUI) ----
 
 	printInfo("Scanning disc %s…", r.cfg.DiscPath)
+	if r.opts.DryRun {
+		fmt.Println(shellquote.Join("makemkvcon", makemkv.ScanArgs(r.cfg.DiscPath)...))
+	}
 	disc, err := makemkv.ScanDisc(ctx, r.cfg.DiscPath, r.opts.Debug)
 	if err != nil {
 		return fmt.Errorf("scanning disc: %w", err)
@@ -118,6 +131,11 @@ func (r *Ripper) Run(ctx context.Context) error {
 		return err
 	}
 	printInfo("Encoding profile: %s", profile.Name)
+
+	if r.opts.DryRun {
+		r.printDryRun(ctx, titles, meta, isTV, tempDir, metaCfg, profile)
+		return nil
+	}
 
 	// ---- Phase 2: rip+encode with bubbletea TUI ----
 
@@ -243,32 +261,8 @@ func (r *Ripper) encodeOne(ctx context.Context, job ripJob, meta *metadata.Info,
 	label := episodeLabel(job.index, isTV, r.opts.Season, r.opts.EpisodeStart, job.title)
 	printInfo("Encoding %s…", label)
 
-	var epTitle string
-	if isTV {
-		ep := r.opts.EpisodeStart + job.index
-		if t, err := metadata.EpisodeTitle(ctx, meta.Title, r.opts.Season, ep, metaCfg); err == nil {
-			epTitle = t
-		}
-	}
-
-	outPath := buildOutputPath(outputDir, meta, isTV, r.opts.Season, r.opts.EpisodeStart+job.index, epTitle, job.index, len(job.title.Name) > 0)
-
-	settings := encoder.EncodeSettings{
-		Languages:     r.cfg.Languages,
-		Subtitles:     r.cfg.Subtitles,
-		StereoAudio:   r.cfg.StereoAudio,
-		SurroundAudio: r.cfg.SurroundAudio,
-		Profile: encoder.VideoProfile{
-			Name:        profile.Name,
-			Codec:       profile.Codec,
-			CRF:         profile.CRF,
-			Preset:      profile.Preset,
-			PixFmt:      profile.PixFmt,
-			VideoFilter: profile.VideoFilter,
-			HWDevice:    profile.HWDevice,
-			ExtraArgs:   profile.ExtraArgs,
-		},
-	}
+	outPath := r.outputPath(ctx, outputDir, job, meta, isTV, metaCfg)
+	settings := r.encodeSettings(profile)
 
 	pb := newBar(slotEnc, fmt.Sprintf("Enc  %s", label))
 	err := encoder.Encode(ctx, job.rippedPath, outPath, settings,
@@ -284,7 +278,152 @@ func (r *Ripper) encodeOne(ctx context.Context, job ripJob, meta *metadata.Info,
 	return nil
 }
 
+// outputPath returns the final file path for job, looking up the episode title for TV.
+func (r *Ripper) outputPath(ctx context.Context, outputDir string, job ripJob, meta *metadata.Info, isTV bool, metaCfg metadata.Config) string {
+	var epTitle string
+	if isTV {
+		ep := r.opts.EpisodeStart + job.index
+		if t, err := metadata.EpisodeTitle(ctx, meta.Title, r.opts.Season, ep, metaCfg); err == nil {
+			epTitle = t
+		}
+	}
+	return buildOutputPath(outputDir, meta, isTV, r.opts.Season, r.opts.EpisodeStart+job.index, epTitle, job.index, len(job.title.Name) > 0)
+}
+
+// encodeSettings converts the config profile into encoder settings.
+func (r *Ripper) encodeSettings(profile config.EncodingProfile) encoder.EncodeSettings {
+	return encoder.EncodeSettings{
+		Languages:     r.cfg.Languages,
+		Subtitles:     r.cfg.Subtitles,
+		StereoAudio:   r.cfg.StereoAudio,
+		SurroundAudio: r.cfg.SurroundAudio,
+		Profile: encoder.VideoProfile{
+			Name:        profile.Name,
+			Codec:       profile.Codec,
+			CRF:         profile.CRF,
+			Preset:      profile.Preset,
+			PixFmt:      profile.PixFmt,
+			VideoFilter: profile.VideoFilter,
+			HWDevice:    profile.HWDevice,
+			ExtraArgs:   profile.ExtraArgs,
+		},
+	}
+}
+
+// ---- dry run ----
+
+// printDryRun prints the commands a real run would execute, as a commented shell script.
+// The ffmpeg stream mapping is predicted from the MakeMKV scan (SINFO), since the
+// ripped file ffprobe would normally analyze does not exist yet.
+func (r *Ripper) printDryRun(ctx context.Context, titles []makemkv.Title, meta *metadata.Info, isTV bool, tempDir string, metaCfg metadata.Config, profile config.EncodingProfile) {
+	settings := r.encodeSettings(profile)
+
+	mode := "parallel (rip of the next title overlaps with encode of the previous one)"
+	if r.opts.Sequential {
+		mode = "sequential (rip all titles, then encode all)"
+	}
+	fmt.Println()
+	fmt.Printf("# Pipeline: %s\n", mode)
+	fmt.Println(shellquote.Join("mkdir", "-p", r.opts.Output))
+
+	for i, title := range titles {
+		label := episodeLabel(i, isTV, r.opts.Season, r.opts.EpisodeStart, title)
+		titleDir := filepath.Join(tempDir, fmt.Sprintf("title_%02d", title.ID))
+
+		fileName := title.FileName
+		if fileName == "" {
+			fileName = "<title>.mkv"
+		}
+		rippedPath := filepath.Join(titleDir, fileName)
+		outPath := r.outputPath(ctx, r.opts.Output, ripJob{title: title, index: i}, meta, isTV, metaCfg)
+
+		fmt.Println()
+		fmt.Printf("# ==== [%d/%d] %s — title %d (%s) ====\n", i+1, len(titles), label, title.ID, formatDuration(title.Duration))
+		fmt.Println(shellquote.Join("mkdir", "-p", titleDir))
+		fmt.Println(shellquote.Join("makemkvcon", makemkv.RipArgs(r.cfg.DiscPath, title.ID, titleDir)...))
+		if title.FileName == "" {
+			fmt.Println("# MakeMKV reported no output file name; ripgo uses the first *.mkv in the title directory")
+		}
+
+		fmt.Println("# Stream analysis after the rip (ripgo selects streams from this output):")
+		fmt.Println(shellquote.Join("ffprobe", encoder.ProbeArgs(rippedPath)...))
+
+		streams := make([]encoder.Stream, 0, len(title.Streams))
+		for _, s := range title.Streams {
+			streams = append(streams, encoder.Stream{
+				Index:    s.Index,
+				Type:     s.Type,
+				Codec:    s.Codec,
+				Language: s.Language,
+				Width:    s.Width,
+				Height:   s.Height,
+				Channels: s.Channels,
+			})
+		}
+		if len(streams) == 0 {
+			fmt.Println("# No stream info in the MakeMKV scan; cannot predict -map arguments")
+		} else {
+			fmt.Println("# Predicted from the MakeMKV scan (indices may differ if MakeMKV selects other streams):")
+			for _, s := range encoder.SelectStreams(streams, settings) {
+				fmt.Printf("#   %s\n", describeStream(s))
+			}
+		}
+
+		args := append([]string{"-stats"}, encoder.BuildArgs(rippedPath, outPath, streams, settings)...)
+		fmt.Println(shellquote.Join("ffmpeg", args...))
+	}
+
+	fmt.Println()
+	if r.opts.KeepCache {
+		fmt.Printf("# Cache is kept (--keep-cache): %s\n", tempDir)
+	} else {
+		fmt.Println("# Cleanup after success:")
+		fmt.Println("# " + shellquote.Join("rm", "-rf", tempDir))
+	}
+}
+
+func describeStream(s encoder.Stream) string {
+	lang := s.Language
+	if lang == "" {
+		lang = "und"
+	}
+	switch s.Type {
+	case "video":
+		return fmt.Sprintf("0:%d video %s %dx%d → %s", s.Index, s.Codec, s.Width, s.Height, "encode")
+	case "audio":
+		action := "aac 160k"
+		if encoder.CopiesAudio(s.Codec) {
+			action = "copy"
+		}
+		return fmt.Sprintf("0:%d audio %s %s %dch → %s", s.Index, lang, s.Codec, s.Channels, action)
+	default:
+		return fmt.Sprintf("0:%d %s %s %s → copy", s.Index, s.Type, lang, s.Codec)
+	}
+}
+
+func formatDuration(sec int) string {
+	return fmt.Sprintf("%02d:%02d:%02d", sec/3600, sec%3600/60, sec%60)
+}
+
 // ---- temp dir management ----
+
+// plannedTempDir returns the cache directory a real run would use, without
+// creating or cleaning anything.
+func (r *Ripper) plannedTempDir() string {
+	if r.cfg.TempDir == "" {
+		dir := filepath.Join(os.TempDir(), "ripgo-XXXXXX")
+		printInfo("No --temp given; a real run creates a random directory like %s", dir)
+		return dir
+	}
+	if entries, err := os.ReadDir(r.cfg.TempDir); err == nil && len(entries) > 0 {
+		if r.opts.ForceClean {
+			printWarn("Cache directory %s is not empty; a real run would delete its contents (--force-clean)", r.cfg.TempDir)
+		} else {
+			printWarn("Cache directory %s is not empty; a real run would fail (use --force-clean)", r.cfg.TempDir)
+		}
+	}
+	return filepath.Join(r.cfg.TempDir, time.Now().Format("20060102-150405"))
+}
 
 func (r *Ripper) prepareTempDir() (dir string, autoCreated bool, err error) {
 	if r.cfg.TempDir != "" {
