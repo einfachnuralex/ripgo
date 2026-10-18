@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -48,6 +49,7 @@ type EncodeSettings struct {
 	Subtitles     bool
 	StereoAudio   bool
 	SurroundAudio bool
+	AudioTracks   []int // explicit stream indices; overrides Languages/StereoAudio/SurroundAudio for audio
 	Profile       VideoProfile
 }
 
@@ -112,6 +114,9 @@ func Encode(ctx context.Context, inputFile, outputFile string, settings EncodeSe
 	info, err := Analyze(ctx, inputFile)
 	if err != nil {
 		return fmt.Errorf("analyzing %s: %w", inputFile, err)
+	}
+	if missing := MissingAudioTracks(info.Streams, settings.AudioTracks); len(missing) > 0 {
+		return fmt.Errorf("audio track(s) %v not found in %s", missing, inputFile)
 	}
 
 	// -progress is a global option; ripgo parses it from stderr
@@ -187,15 +192,23 @@ func SelectStreams(streams []Stream, s EncodeSettings) []Stream {
 		selected = append(selected, *bestVideo)
 	}
 
-	// Audio streams matching language and channel configuration
-	for _, stream := range streams {
-		if stream.Type != "audio" || !langMatch(stream.Language) {
-			continue
+	// Audio streams: explicit indices override the language/channel selection
+	if len(s.AudioTracks) > 0 {
+		for _, stream := range streams {
+			if stream.Type == "audio" && slices.Contains(s.AudioTracks, stream.Index) {
+				selected = append(selected, stream)
+			}
 		}
-		if stream.Channels <= 2 && s.StereoAudio {
-			selected = append(selected, stream)
-		} else if stream.Channels > 2 && s.SurroundAudio {
-			selected = append(selected, stream)
+	} else {
+		for _, stream := range streams {
+			if stream.Type != "audio" || !langMatch(stream.Language) {
+				continue
+			}
+			if stream.Channels <= 2 && s.StereoAudio {
+				selected = append(selected, stream)
+			} else if stream.Channels > 2 && s.SurroundAudio {
+				selected = append(selected, stream)
+			}
 		}
 	}
 
@@ -211,14 +224,34 @@ func SelectStreams(streams []Stream, s EncodeSettings) []Stream {
 	return selected
 }
 
-// CopiesAudio reports whether an audio stream with the given codec is stream-copied
-// (true) or transcoded to AAC (false).
-func CopiesAudio(codec string) bool {
-	switch strings.ToLower(codec) {
-	case "aac", "ac3", "eac3":
-		return true
+// MissingAudioTracks returns the requested indices that are not audio streams in streams.
+func MissingAudioTracks(streams []Stream, tracks []int) []int {
+	var missing []int
+	for _, t := range tracks {
+		found := false
+		for _, s := range streams {
+			if s.Index == t && s.Type == "audio" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, t)
+		}
 	}
-	return false
+	return missing
+}
+
+// audioBitrate is the fixed bitrate for audio streams transcoded to AAC.
+const audioBitrate = "160k"
+
+// AudioBitrate returns the bitrate used when transcoding audio to AAC.
+func AudioBitrate() string { return audioBitrate }
+
+// CopiesAudio reports whether an audio stream with the given codec is stream-copied
+// (true, only AAC) or transcoded to AAC (false, every other codec).
+func CopiesAudio(codec string) bool {
+	return strings.EqualFold(codec, "aac")
 }
 
 // qualityFlagForCodec returns the appropriate ffmpeg quality flag for the given codec.
@@ -280,7 +313,7 @@ func buildArgs(input, output string, streams []Stream, profile VideoProfile) []s
 			} else {
 				args = append(args,
 					fmt.Sprintf("-c:a:%d", audioIdx), "aac",
-					fmt.Sprintf("-b:a:%d", audioIdx), "160k",
+					fmt.Sprintf("-b:a:%d", audioIdx), audioBitrate,
 				)
 			}
 			audioIdx++

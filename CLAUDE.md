@@ -164,6 +164,7 @@ The type chain: `config.EncodingProfile` (config package) → converted to `enco
 --keep-cache               Don't delete cache after successful rip+encode
 --force-clean              Clean cache directory if not empty at startup
 --profile <name>           Encoding profile name (defined in config file)
+--audio-tracks <i,j,...>   Audio stream indices (ffprobe index, e.g. 1,3); overrides language/channel selection
 --debug                    Verbose output: MakeMKV lines + makemkvcon/ffmpeg commands
 --dry-run                  Scan + metadata only; print all commands instead of running them
 -v, --version              Show version
@@ -193,5 +194,5 @@ No code generation. No external test fixtures needed for `go build`. Unit tests:
 - **Two-phase split**: `fmt.Scanln` for the TV/movie prompt must run before `tea.NewProgram` takes the terminal into raw mode.
 - **Import cycle prevention**: `config` defines `EncodingProfile`; `encoder` defines `VideoProfile`. Conversion happens in `ripper` which imports both.
 - **makemkvcon exit code**: it returns non-zero even on success; the scan only fails if both `disc.Name` and `titles` are empty after parsing.
-- **Audio codec handling**: AAC, AC3, EAC3 are stream-copied; everything else is transcoded to AAC 160k. Stream selection is per-language and per-channel-count (stereo ≤2ch, surround >2ch).
+- **Audio codec handling**: only AAC is stream-copied; everything else (incl. AC3/EAC3) is transcoded to AAC 160k. Stream selection is per-language and per-channel-count (stereo ≤2ch, surround >2ch). `--audio-tracks` selects streams by index instead (language/channel filters are skipped for audio); a requested index that is not an audio stream makes `Encode` fail, the dry run only warns.
 - **ffmpeg error output**: stderr is piped and consumed for progress parsing (`out_time_us=`). Non-progress lines (actual errors) are only forwarded to the user when `--debug` is set. Without `--debug`, encoding failures show only the exit code (e.g. `exit status 218`) with no human-readable message. This is a known gap.

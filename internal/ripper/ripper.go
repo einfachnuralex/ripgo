@@ -33,6 +33,7 @@ type Options struct {
 	KeepCache    bool
 	ForceClean   bool
 	Profile      string // encoding profile name; empty = use first profile
+	AudioTracks  []int  // explicit audio stream indices; empty = select by language/channels
 	Debug        bool
 	DryRun       bool // scan + metadata only; print commands instead of ripping/encoding
 }
@@ -297,6 +298,7 @@ func (r *Ripper) encodeSettings(profile config.EncodingProfile) encoder.EncodeSe
 		Subtitles:     r.cfg.Subtitles,
 		StereoAudio:   r.cfg.StereoAudio,
 		SurroundAudio: r.cfg.SurroundAudio,
+		AudioTracks:   r.opts.AudioTracks,
 		Profile: encoder.VideoProfile{
 			Name:        profile.Name,
 			Codec:       profile.Codec,
@@ -367,6 +369,9 @@ func (r *Ripper) printDryRun(ctx context.Context, titles []makemkv.Title, meta *
 			for _, s := range encoder.SelectStreams(streams, settings) {
 				fmt.Printf("#   %s\n", describeStream(s))
 			}
+			if missing := encoder.MissingAudioTracks(streams, settings.AudioTracks); len(missing) > 0 {
+				fmt.Printf("# WARNING: audio track(s) %v not found in the MakeMKV scan\n", missing)
+			}
 		}
 
 		args := append([]string{"-stats"}, encoder.BuildArgs(rippedPath, outPath, streams, settings)...)
@@ -391,7 +396,7 @@ func describeStream(s encoder.Stream) string {
 	case "video":
 		return fmt.Sprintf("0:%d video %s %dx%d → %s", s.Index, s.Codec, s.Width, s.Height, "encode")
 	case "audio":
-		action := "aac 160k"
+		action := "aac " + encoder.AudioBitrate()
 		if encoder.CopiesAudio(s.Codec) {
 			action = "copy"
 		}

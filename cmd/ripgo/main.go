@@ -9,6 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/einfachnuralex/ripgo/internal/config"
@@ -63,6 +66,7 @@ func main() {
 		KeepCache:    opts.keepCache,
 		ForceClean:   opts.forceClean,
 		Profile:      opts.profile,
+		AudioTracks:  opts.audioTracks,
 		Debug:        opts.debug,
 		DryRun:       opts.dryRun,
 	})
@@ -87,8 +91,27 @@ type cliOptions struct {
 	keepCache    bool
 	forceClean   bool
 	profile      string
+	audioTracks  []int
 	debug        bool
 	dryRun       bool
+}
+
+// parseAudioTracks parses a comma-separated list of stream indices, dropping duplicates.
+func parseAudioTracks(s string) ([]int, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var tracks []int
+	for _, part := range strings.Split(s, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid audio-tracks entry %q: must be a non-negative stream index", part)
+		}
+		if !slices.Contains(tracks, n) {
+			tracks = append(tracks, n)
+		}
+	}
+	return tracks, nil
 }
 
 func parseArgs(args []string) (*cliOptions, error) {
@@ -113,6 +136,7 @@ func parseArgs(args []string) (*cliOptions, error) {
 		keepCache    = fs.Bool("keep-cache", false, "Don't delete cache after successful rip+encode")
 		forceClean   = fs.Bool("force-clean", false, "Clean cache directory if not empty at startup")
 		profile      = fs.String("profile", "", "Encoding profile name (defined in config file)")
+		audioTracks  = fs.String("audio-tracks", "", "Audio stream indices to include, comma-separated (e.g. 1,3)")
 		debug        = fs.Bool("debug", false, "Enable verbose debug output")
 		dryRun       = fs.Bool("dry-run", false, "Scan disc and print commands without ripping or encoding")
 		showVersion  = fs.Bool("version", false, "Show version")
@@ -149,6 +173,11 @@ func parseArgs(args []string) (*cliOptions, error) {
 		}
 	}
 
+	tracks, err := parseAudioTracks(*audioTracks)
+	if err != nil {
+		return nil, err
+	}
+
 	if *output == "" {
 		return nil, fmt.Errorf("--output is required")
 	}
@@ -167,6 +196,7 @@ func parseArgs(args []string) (*cliOptions, error) {
 		keepCache:    *keepCache,
 		forceClean:   *forceClean,
 		profile:      *profile,
+		audioTracks:  tracks,
 		debug:        *debug,
 		dryRun:       *dryRun,
 	}, nil
@@ -209,8 +239,10 @@ OPTIONS:
     --keep-cache               Don't delete cache after successful rip+encode
     --force-clean              Clean cache directory if not empty at startup
     --profile <name>           Encoding profile name (defined in config file)
+    --audio-tracks <i,j,...>   Audio stream indices to include (e.g. 1,3); overrides the
+                               language/channel selection. AAC is copied, others become AAC 160k
     --debug                    Enable verbose debug output
-    --dry-run                  Scan disc and print makemkvcon/ffprobe/ffmpeg commands
+    --dry-run                 Scan disc and print makemkvcon/ffprobe/ffmpeg commands
                                without ripping, encoding or creating directories
     -v, --version              Show version
     -h, --help                 Show this help
@@ -226,5 +258,6 @@ EXAMPLES:
     ripsharp --output ~/Movies --disc "file:/path/to/movie.iso"
     ripsharp --output ~/Movies --disc disc:1 --temp /tmp/rip
     ripsharp --output ~/Movies --dry-run
+    ripsharp --output ~/Movies --dry-run --audio-tracks 1,3
 `, version)
 }
