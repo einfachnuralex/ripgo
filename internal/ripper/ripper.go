@@ -34,6 +34,7 @@ type Options struct {
 	ForceClean   bool
 	Profile      string // encoding profile name; empty = use first profile
 	AudioTracks  []int  // explicit audio stream indices; empty = select by language/channels
+	Ask          bool   // interactively ask for title, titles/playlists and audio tracks after the scan
 	Debug        bool
 	DryRun       bool // scan + metadata only; print commands instead of ripping/encoding
 }
@@ -93,12 +94,13 @@ func (r *Ripper) Run(ctx context.Context) error {
 		return err
 	}
 
+	profile, err := r.resolveProfile()
+	if err != nil {
+		return err
+	}
+
 	titles := makemkv.FilterTitles(disc.Titles, isTV,
 		r.cfg.MinMovieDuration, r.cfg.MinEpisodeDuration, r.cfg.MaxEpisodeDuration)
-	if len(titles) == 0 {
-		return fmt.Errorf("no titles found matching duration criteria")
-	}
-	printInfo("Processing %d title(s) as %s", len(titles), contentLabel(isTV))
 
 	sourceTitle := r.opts.Title
 	if sourceTitle == "" {
@@ -112,6 +114,25 @@ func (r *Ripper) Run(ctx context.Context) error {
 		}
 		printWarn("No title available; using fallback %q", sourceTitle)
 	}
+
+	if r.opts.Ask {
+		p := newPrompter(os.Stdin, os.Stdout)
+		label := "Movie title"
+		if isTV {
+			label = "Series title"
+		}
+		sourceTitle = p.ask(label, sourceTitle)
+		if titles, err = chooseTitles(p, disc.Type, disc.Titles, titles); err != nil {
+			return err
+		}
+		if r.opts.AudioTracks, err = r.askAudio(p, titles, r.encodeSettings(profile)); err != nil {
+			return err
+		}
+	}
+	if len(titles) == 0 {
+		return fmt.Errorf("no titles found matching duration criteria")
+	}
+	printInfo("Processing %d title(s) as %s", len(titles), contentLabel(isTV))
 
 	metaCfg := metadata.Config{
 		TMDBKey: r.cfg.TMDBKey,
@@ -127,10 +148,6 @@ func (r *Ripper) Run(ctx context.Context) error {
 		printOK("Metadata: %s (%d)", meta.Title, meta.Year)
 	}
 
-	profile, err := r.resolveProfile()
-	if err != nil {
-		return err
-	}
 	printInfo("Encoding profile: %s", profile.Name)
 
 	if r.opts.DryRun {
@@ -350,18 +367,7 @@ func (r *Ripper) printDryRun(ctx context.Context, titles []makemkv.Title, meta *
 		fmt.Println("# Stream analysis after the rip (ripgo selects streams from this output):")
 		fmt.Println(shellquote.Join("ffprobe", encoder.ProbeArgs(rippedPath)...))
 
-		streams := make([]encoder.Stream, 0, len(title.Streams))
-		for _, s := range title.Streams {
-			streams = append(streams, encoder.Stream{
-				Index:    s.Index,
-				Type:     s.Type,
-				Codec:    s.Codec,
-				Language: s.Language,
-				Width:    s.Width,
-				Height:   s.Height,
-				Channels: s.Channels,
-			})
-		}
+		streams := toEncoderStreams(title)
 		if len(streams) == 0 {
 			fmt.Println("# No stream info in the MakeMKV scan; cannot predict -map arguments")
 		} else {

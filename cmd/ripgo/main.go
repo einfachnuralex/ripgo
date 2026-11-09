@@ -9,9 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"slices"
-	"strconv"
-	"strings"
 	"syscall"
 
 	"github.com/einfachnuralex/ripgo/internal/config"
@@ -67,6 +64,7 @@ func main() {
 		ForceClean:   opts.forceClean,
 		Profile:      opts.profile,
 		AudioTracks:  opts.audioTracks,
+		Ask:          opts.ask,
 		Debug:        opts.debug,
 		DryRun:       opts.dryRun,
 	})
@@ -92,26 +90,9 @@ type cliOptions struct {
 	forceClean   bool
 	profile      string
 	audioTracks  []int
+	ask          bool
 	debug        bool
 	dryRun       bool
-}
-
-// parseAudioTracks parses a comma-separated list of stream indices, dropping duplicates.
-func parseAudioTracks(s string) ([]int, error) {
-	if strings.TrimSpace(s) == "" {
-		return nil, nil
-	}
-	var tracks []int
-	for _, part := range strings.Split(s, ",") {
-		n, err := strconv.Atoi(strings.TrimSpace(part))
-		if err != nil || n < 0 {
-			return nil, fmt.Errorf("invalid audio-tracks entry %q: must be a non-negative stream index", part)
-		}
-		if !slices.Contains(tracks, n) {
-			tracks = append(tracks, n)
-		}
-	}
-	return tracks, nil
 }
 
 func parseArgs(args []string) (*cliOptions, error) {
@@ -137,6 +118,7 @@ func parseArgs(args []string) (*cliOptions, error) {
 		forceClean   = fs.Bool("force-clean", false, "Clean cache directory if not empty at startup")
 		profile      = fs.String("profile", "", "Encoding profile name (defined in config file)")
 		audioTracks  = fs.String("audio-tracks", "", "Audio stream indices to include, comma-separated (e.g. 1,3)")
+		ask          = fs.Bool("ask", false, "Ask for title, titles/playlists and audio tracks after the disc scan")
 		debug        = fs.Bool("debug", false, "Enable verbose debug output")
 		dryRun       = fs.Bool("dry-run", false, "Scan disc and print commands without ripping or encoding")
 		showVersion  = fs.Bool("version", false, "Show version")
@@ -173,9 +155,9 @@ func parseArgs(args []string) (*cliOptions, error) {
 		}
 	}
 
-	tracks, err := parseAudioTracks(*audioTracks)
+	tracks, err := ripper.ParseIndexList(*audioTracks)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("--audio-tracks: %w", err)
 	}
 
 	if *output == "" {
@@ -197,6 +179,7 @@ func parseArgs(args []string) (*cliOptions, error) {
 		forceClean:   *forceClean,
 		profile:      *profile,
 		audioTracks:  tracks,
+		ask:          *ask,
 		debug:        *debug,
 		dryRun:       *dryRun,
 	}, nil
@@ -241,6 +224,9 @@ OPTIONS:
     --profile <name>           Encoding profile name (defined in config file)
     --audio-tracks <i,j,...>   Audio stream indices to include (e.g. 1,3); overrides the
                                language/channel selection. AAC is copied, others become AAC 160k
+    --ask                      After the disc scan, ask for the title, the titles (DVD) /
+                               playlists (Blu-ray) to process and the audio tracks to include;
+                               Enter accepts the shown default
     --debug                    Enable verbose debug output
     --dry-run                 Scan disc and print makemkvcon/ffprobe/ffmpeg commands
                                without ripping, encoding or creating directories
@@ -257,6 +243,7 @@ EXAMPLES:
     ripsharp --output ~/TV --mode tv --title "Breaking Bad" --season 2
     ripsharp --output ~/Movies --disc "file:/path/to/movie.iso"
     ripsharp --output ~/Movies --disc disc:1 --temp /tmp/rip
+    ripsharp --output ~/Movies --ask
     ripsharp --output ~/Movies --dry-run
     ripsharp --output ~/Movies --dry-run --audio-tracks 1,3
 `, version)

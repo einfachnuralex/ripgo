@@ -20,9 +20,13 @@ type Title struct {
 	ID       int
 	Name     string
 	FileName string // output file name MakeMKV will write (TINFO 27)
-	Duration int    // seconds
-	Size     int64  // bytes reported by MakeMKV
-	Streams  []Stream
+	// SourceFile is the disc source of the title (TINFO 16), e.g. "00800.mpls"
+	// for a Blu-ray playlist. Empty if MakeMKV reports none.
+	SourceFile string
+	Chapters   int   // chapter count (TINFO 8)
+	Duration   int   // seconds
+	Size       int64 // bytes reported by MakeMKV
+	Streams    []Stream
 }
 
 // Stream describes a single stream of a title as reported by the scan (SINFO).
@@ -147,10 +151,14 @@ func parseScanLine(line string, info *DiscInfo, titles map[int]*Title) {
 			if t.Name == "" {
 				t.Name = val
 			}
+		case 8: // chapter count
+			t.Chapters, _ = strconv.Atoi(val)
 		case 9: // duration HH:MM:SS
 			t.Duration = parseDuration(val)
 		case 10: // size in bytes
 			t.Size, _ = strconv.ParseInt(val, 10, 64)
+		case 16: // source file name (Blu-ray playlist, e.g. 00800.mpls)
+			t.SourceFile = val
 		case 27: // output filename - use as name fallback
 			t.FileName = filepath.Base(val)
 			if t.Name == "" {

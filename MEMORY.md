@@ -9,6 +9,7 @@ Branch `tui`. Letzte Arbeiten:
 - VAAPI-Support: optionale Felder, `hw_device`, `extra_args`, Quality-Flag-Auto-Erkennung
 - Config-Feedback beim Start: `config.Load()` gibt Pfad zurück, druckt `→ Config: <pfad>` in Phase 1
 - `--dry-run` (2026-10-14): Phase 1 echt, danach Befehle (makemkvcon/ffprobe/ffmpeg) als kopierbares Shell-Skript statt Rip/Encode
+- `--ask` (2026-10-18): nach dem Scan (Phase 1) Rückfragen nach Titel, Titles/Playlists (Komma-Liste von MakeMKV-Title-IDs) und Audio-Tracks (Stream-Indizes); Enter = Default. Code in `internal/ripper/ask.go`
 
 ---
 
@@ -117,6 +118,7 @@ metadata → (nur stdlib)
 | Audio-Copy-Strategie | AAC/AC3/EAC3 stream-copy, alles andere → AAC 160k transcode |
 | `_vaapi`-Quality-Flag | Auto-Erkennung: `*_vaapi` → `-global_quality`, sonst `-crf` |
 | Dry-Run-Stream-Vorhersage aus SINFO | Gerippte MKV existiert im Dry Run noch nicht → `-map` aus Scan-Daten vorhergesagt (mit Hinweis), ffprobe-Befehl zusätzlich ausgegeben. Vom User so gewählt ("beides kombiniert") |
+| `--ask` wählt per Title-ID | Auch bei BD (Playlist `*.mpls` wird nur angezeigt, TINFO 16 → `Title.SourceFile`). Eingabereihenfolge = Verarbeitungs-/Episodenreihenfolge. Audio-Indizes gelten für alle gewählten Titles (Anzeige anhand des ersten). `resolveProfile` läuft dafür vor den Fragen |
 | Ein Arg-Builder pro Befehl | `ScanArgs`/`RipArgs`/`ProbeArgs`/`BuildArgs` werden vom echten Lauf und vom Dry Run genutzt → ausgegebene Befehle können nicht auseinanderlaufen |
 | `-progress pipe:2` nicht in `BuildArgs` | Nur ripgo braucht es; `Encode` stellt es voran, Dry Run stellt `-stats` voran |
 
@@ -137,6 +139,10 @@ metadata → (nur stdlib)
 ### MakeMKV SINFO-Attribut-IDs (Dry-Run-Vorhersage)
 
 `SINFO:titleID,streamID,attrID,code,"value"` — 1 Typ (Video/Audio/Subtitles), 3 Sprachcode, 5 Codec-ID (`A_AC3` …, via `normalizeCodec` auf ffprobe-Namen), 14 Kanäle, 19 `WxH`. Streams, die MakeMKV beim Rip abwählt, verschieben die Indizes — deshalb nur Vorhersage. Nicht gegen eine echte Disc verifiziert, nur mit Stub-`makemkvcon`.
+
+### TINFO 16 / 8 (Ask-Modus)
+
+`Title.SourceFile` (TINFO 16, BD-Playlist) und `Chapters` (TINFO 8) sind nur gegen eine Testzeile geprüft, noch nicht gegen eine echte Disc. Beim ersten Lauf mit `--ask --debug` prüfen, ob die `.mpls`-Namen in der Titel-Tabelle erscheinen.
 
 ### VAAPI-Profile brauchen explizite Konfiguration
 

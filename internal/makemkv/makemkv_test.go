@@ -4,7 +4,9 @@ import "testing"
 
 func TestParseScanLineStreams(t *testing.T) {
 	lines := []string{
+		`TINFO:3,8,0,"7"`,
 		`TINFO:3,9,0,"0:42:10"`,
+		`TINFO:3,16,0,"00800.mpls"`,
 		`TINFO:3,27,0,"Show_t03.mkv"`,
 		`SINFO:3,0,1,6201,"Video"`,
 		`SINFO:3,0,5,0,"V_MPEG4/ISO/AVC"`,
@@ -29,6 +31,12 @@ func TestParseScanLineStreams(t *testing.T) {
 	}
 	if got.FileName != "Show_t03.mkv" {
 		t.Errorf("FileName = %q", got.FileName)
+	}
+	if got.SourceFile != "00800.mpls" {
+		t.Errorf("SourceFile = %q", got.SourceFile)
+	}
+	if got.Chapters != 7 {
+		t.Errorf("Chapters = %d", got.Chapters)
 	}
 	if got.Duration != 42*60+10 {
 		t.Errorf("Duration = %d", got.Duration)

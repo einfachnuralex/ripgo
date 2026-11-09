@@ -11,6 +11,7 @@ internal/makemkv/makemkv.go    MakeMKV wrapper (scan + rip)
 internal/encoder/encoder.go    FFmpeg wrapper (probe + encode)
 internal/metadata/metadata.go  TMDB / OMDB / TVDB lookups
 internal/ripper/ripper.go      Orchestration, pipeline, TUI, dry run
+internal/ripper/ask.go         --ask mode: interactive questions (title, titles/playlists, audio)
 internal/shellquote/           POSIX shell quoting for printed commands
 ```
 
@@ -165,11 +166,22 @@ The type chain: `config.EncodingProfile` (config package) → converted to `enco
 --force-clean              Clean cache directory if not empty at startup
 --profile <name>           Encoding profile name (defined in config file)
 --audio-tracks <i,j,...>   Audio stream indices (ffprobe index, e.g. 1,3); overrides language/channel selection
+--ask                      Ask for title, titles/playlists and audio tracks after the disc scan
 --debug                    Verbose output: MakeMKV lines + makemkvcon/ffmpeg commands
 --dry-run                  Scan + metadata only; print all commands instead of running them
 -v, --version              Show version
 -h, --help                 Show help
 ```
+
+## Ask mode (`--ask`)
+
+Part of Phase 1 (plain stdout, before the TUI). After the disc scan and TV/movie detection, `Run` asks three questions via a shared `prompter` (`internal/ripper/ask.go`). Enter accepts the default shown in brackets; invalid input is asked again; EOF on stdin accepts the defaults.
+
+1. **Title** — default `--title`, else disc name. The answer is used for the metadata lookup.
+2. **Titles (DVD) / Playlists (Blu-ray)** — comma-separated MakeMKV title IDs. All titles are listed (`*` = passed the duration filter, which is the default). For Blu-ray the playlist (`Title.SourceFile`, TINFO 16, e.g. `00800.mpls`) is shown, but the ID is what you enter. The input order is kept and defines the episode order in TV mode.
+3. **Audio tracks** — comma-separated stream indices, listed from the first selected title (default: `--audio-tracks`, else what `encoder.SelectStreams` would pick). Applies to all selected titles; the answer replaces `Options.AudioTracks`. Only audio streams are accepted. Empty answer with no default keeps the automatic selection.
+
+`--ask` works together with `--dry-run`. `resolveProfile` runs before the questions so a bad `--profile` fails early.
 
 ## Dry run (`--dry-run`)
 
