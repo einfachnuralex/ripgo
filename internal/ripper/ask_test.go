@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/einfachnuralex/ripgo/internal/disc"
 	"github.com/einfachnuralex/ripgo/internal/encoder"
-	"github.com/einfachnuralex/ripgo/internal/makemkv"
 )
 
 func TestParseIndexList(t *testing.T) {
@@ -53,11 +53,11 @@ func TestPrompterAsk(t *testing.T) {
 	}
 }
 
-func testTitles() []makemkv.Title {
-	return []makemkv.Title{{ID: 0, Name: "a"}, {ID: 1, Name: "b"}, {ID: 5, Name: "c", SourceFile: "00800.mpls"}}
+func testTitles() []disc.Title {
+	return []disc.Title{{ID: 0}, {ID: 1}, {ID: 5, SourceFile: "00800.mpls"}}
 }
 
-func ids(titles []makemkv.Title) []int {
+func ids(titles []disc.Title) []int {
 	var out []int
 	for _, t := range titles {
 		out = append(out, t.ID)

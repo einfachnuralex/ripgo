@@ -186,18 +186,16 @@ func parseArgs(args []string) (*cliOptions, error) {
 }
 
 // checkPrerequisites verifies the external tools are in PATH.
-// A dry run only executes the disc scan, so ffmpeg/ffprobe are optional there.
+// A dry run only executes the disc scan (ffprobe), so ffmpeg is optional there.
 func checkPrerequisites(dryRun bool) error {
-	if _, err := exec.LookPath("makemkvcon"); err != nil {
-		return fmt.Errorf("makemkvcon not found in PATH")
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		return fmt.Errorf("ffprobe not found in PATH")
 	}
-	for _, tool := range []string{"ffmpeg", "ffprobe"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			if !dryRun {
-				return fmt.Errorf("%s not found in PATH", tool)
-			}
-			fmt.Fprintf(os.Stderr, "\033[33m⚠\033[0m %s not found in PATH (not needed for --dry-run)\n", tool)
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		if !dryRun {
+			return fmt.Errorf("ffmpeg not found in PATH")
 		}
+		fmt.Fprintf(os.Stderr, "\033[33m⚠\033[0m ffmpeg not found in PATH (not needed for --dry-run)\n")
 	}
 	return nil
 }
@@ -211,7 +209,8 @@ USAGE:
 OPTIONS:
     --output, -o <path>        Output directory (required)
     --mode <mode>              Content type: auto, movie, tv (default: auto)
-    --disc <path>              Disc path (default: disc:0)
+    --disc <path>              Disc source: drive, ISO image or directory
+                               with VIDEO_TS/BDMV (default: /dev/sr0)
     --temp <path>              Temporary directory for ripped files
     --title <text>             Override title for metadata lookup
     --year <year>              Release year (movies)
@@ -228,7 +227,7 @@ OPTIONS:
                                playlists (Blu-ray) to process and the audio tracks to include;
                                Enter accepts the shown default
     --debug                    Enable verbose debug output
-    --dry-run                 Scan disc and print makemkvcon/ffprobe/ffmpeg commands
+    --dry-run                  Scan disc and print the ffprobe/ffmpeg commands
                                without ripping, encoding or creating directories
     -v, --version              Show version
     -h, --help                 Show this help
@@ -241,8 +240,8 @@ ENVIRONMENT:
 EXAMPLES:
     ripsharp --output ~/Movies
     ripsharp --output ~/TV --mode tv --title "Breaking Bad" --season 2
-    ripsharp --output ~/Movies --disc "file:/path/to/movie.iso"
-    ripsharp --output ~/Movies --disc disc:1 --temp /tmp/rip
+    ripsharp --output ~/Movies --disc /path/to/movie.iso
+    ripsharp --output ~/Movies --disc /dev/sr1 --temp /tmp/rip
     ripsharp --output ~/Movies --ask
     ripsharp --output ~/Movies --dry-run
     ripsharp --output ~/Movies --dry-run --audio-tracks 1,3

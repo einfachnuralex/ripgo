@@ -14,8 +14,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/einfachnuralex/ripgo/internal/config"
+	"github.com/einfachnuralex/ripgo/internal/disc"
 	"github.com/einfachnuralex/ripgo/internal/encoder"
-	"github.com/einfachnuralex/ripgo/internal/makemkv"
+	"github.com/einfachnuralex/ripgo/internal/ffmpeg"
 	"github.com/einfachnuralex/ripgo/internal/metadata"
 	"github.com/einfachnuralex/ripgo/internal/shellquote"
 )
@@ -43,6 +44,7 @@ type Options struct {
 type Ripper struct {
 	cfg  *config.Config
 	opts Options
+	scan *disc.DiscInfo // result of the disc scan (Phase 1)
 }
 
 // New creates a Ripper with the given config and options.
@@ -75,21 +77,20 @@ func (r *Ripper) Run(ctx context.Context) error {
 
 	// ---- Phase 1: scan/detect/metadata (plain stdout, no TUI) ----
 
-	printInfo("Scanning disc %s…", r.cfg.DiscPath)
-	if r.opts.DryRun {
-		fmt.Println(shellquote.Join("makemkvcon", makemkv.ScanArgs(r.cfg.DiscPath)...))
-	}
-	disc, err := makemkv.ScanDisc(ctx, r.cfg.DiscPath, r.opts.Debug)
+	source := disc.NormalizeSource(r.cfg.DiscPath)
+	printInfo("Scanning disc %s…", source)
+	info, err := disc.Scan(ctx, source, r.opts.DiscType, r.opts.Debug)
 	if err != nil {
 		return fmt.Errorf("scanning disc: %w", err)
 	}
-	if r.opts.DiscType != "" {
-		disc.Type = r.opts.DiscType
+	r.scan = info
+	for _, w := range info.Warnings {
+		printWarn("%s", w)
 	}
-	printOK("Disc: %s (%s), %d title(s) found", disc.Name, strings.ToUpper(disc.Type), len(disc.Titles))
+	printOK("Disc: %s (%s), %d title(s) found", info.Name, strings.ToUpper(info.Type), len(info.Titles))
 
 	// resolveContentType may call fmt.Scanln — must run before TUI takes the terminal.
-	isTV, err := r.resolveContentType(disc)
+	isTV, err := r.resolveContentType(info)
 	if err != nil {
 		return err
 	}
@@ -99,12 +100,12 @@ func (r *Ripper) Run(ctx context.Context) error {
 		return err
 	}
 
-	titles := makemkv.FilterTitles(disc.Titles, isTV,
+	titles := disc.FilterTitles(info.Titles, isTV,
 		r.cfg.MinMovieDuration, r.cfg.MinEpisodeDuration, r.cfg.MaxEpisodeDuration)
 
 	sourceTitle := r.opts.Title
 	if sourceTitle == "" {
-		sourceTitle = disc.Name
+		sourceTitle = info.Name
 	}
 	if sourceTitle == "" {
 		if isTV {
@@ -122,7 +123,7 @@ func (r *Ripper) Run(ctx context.Context) error {
 			label = "Series title"
 		}
 		sourceTitle = p.ask(label, sourceTitle)
-		if titles, err = chooseTitles(p, disc.Type, disc.Titles, titles); err != nil {
+		if titles, err = chooseTitles(p, info.Type, info.Titles, titles); err != nil {
 			return err
 		}
 		if r.opts.AudioTracks, err = r.askAudio(p, titles, r.encodeSettings(profile)); err != nil {
@@ -193,12 +194,12 @@ func (r *Ripper) Run(ctx context.Context) error {
 // ---- parallel pipeline (rip → encode concurrently) ----
 
 type ripJob struct {
-	title      makemkv.Title
+	title      disc.Title
 	index      int // position among selected titles (0-based)
 	rippedPath string
 }
 
-func (r *Ripper) runParallel(ctx context.Context, titles []makemkv.Title, meta *metadata.Info, isTV bool, tempDir string, metaCfg metadata.Config, profile config.EncodingProfile) error {
+func (r *Ripper) runParallel(ctx context.Context, titles []disc.Title, meta *metadata.Info, isTV bool, tempDir string, metaCfg metadata.Config, profile config.EncodingProfile) error {
 	if uiProg != nil {
 		uiProg.Send(msgOverallInit{totalSteps: len(titles) * 2})
 	}
@@ -239,15 +240,7 @@ func (r *Ripper) runParallel(ctx context.Context, titles []makemkv.Title, meta *
 		printInfo("[%d/%d] Ripping %s…", i+1, len(titles), label)
 
 		pb := newBar(slotRip, fmt.Sprintf("Rip  %s", label))
-		err := makemkv.RipTitle(ctx, r.cfg.DiscPath, title.ID, titleDir,
-			func(frac float64, caption string) {
-				if frac >= 0 {
-					pb.set(frac)
-				}
-				if caption != "" {
-					pb.setCaption(caption)
-				}
-			}, r.opts.Debug)
+		err := disc.Rip(ctx, r.scan, title, titleDir, pb.progress, r.opts.Debug)
 		pb.done()
 
 		if err != nil {
@@ -255,13 +248,7 @@ func (r *Ripper) runParallel(ctx context.Context, titles []makemkv.Title, meta *
 			continue
 		}
 
-		rippedPath, err := makemkv.FindRippedFile(titleDir)
-		if err != nil {
-			printErr("Cannot find ripped MKV for title %d: %v", title.ID, err)
-			continue
-		}
-
-		ripCh <- ripJob{title: title, index: i, rippedPath: rippedPath}
+		ripCh <- ripJob{title: title, index: i, rippedPath: disc.RipFile(titleDir)}
 	}
 
 	close(ripCh)
@@ -283,9 +270,7 @@ func (r *Ripper) encodeOne(ctx context.Context, job ripJob, meta *metadata.Info,
 	settings := r.encodeSettings(profile)
 
 	pb := newBar(slotEnc, fmt.Sprintf("Enc  %s", label))
-	err := encoder.Encode(ctx, job.rippedPath, outPath, settings,
-		func(frac float64) { pb.set(frac) },
-		r.opts.Debug)
+	err := encoder.Encode(ctx, job.rippedPath, outPath, settings, pb.progress, r.opts.Debug)
 	pb.done()
 
 	if err != nil {
@@ -305,7 +290,7 @@ func (r *Ripper) outputPath(ctx context.Context, outputDir string, job ripJob, m
 			epTitle = t
 		}
 	}
-	return buildOutputPath(outputDir, meta, isTV, r.opts.Season, r.opts.EpisodeStart+job.index, epTitle, job.index, len(job.title.Name) > 0)
+	return buildOutputPath(outputDir, meta, isTV, r.opts.Season, r.opts.EpisodeStart+job.index, epTitle, job.index)
 }
 
 // encodeSettings converts the config profile into encoder settings.
@@ -332,9 +317,9 @@ func (r *Ripper) encodeSettings(profile config.EncodingProfile) encoder.EncodeSe
 // ---- dry run ----
 
 // printDryRun prints the commands a real run would execute, as a commented shell script.
-// The ffmpeg stream mapping is predicted from the MakeMKV scan (SINFO), since the
-// ripped file ffprobe would normally analyze does not exist yet.
-func (r *Ripper) printDryRun(ctx context.Context, titles []makemkv.Title, meta *metadata.Info, isTV bool, tempDir string, metaCfg metadata.Config, profile config.EncodingProfile) {
+// The ffmpeg stream mapping is derived from the disc scan, since the ripped file
+// ffprobe would normally analyze does not exist yet.
+func (r *Ripper) printDryRun(ctx context.Context, titles []disc.Title, meta *metadata.Info, isTV bool, tempDir string, metaCfg metadata.Config, profile config.EncodingProfile) {
 	settings := r.encodeSettings(profile)
 
 	mode := "parallel (rip of the next title overlaps with encode of the previous one)"
@@ -342,6 +327,12 @@ func (r *Ripper) printDryRun(ctx context.Context, titles []makemkv.Title, meta *
 		mode = "sequential (rip all titles, then encode all)"
 	}
 	fmt.Println()
+	if r.scan.Type == "dvd" {
+		fmt.Println("# Disc scan: UDF + VIDEO_TS.IFO read by ripgo, then per title:")
+		fmt.Println("# " + shellquote.Join("ffprobe", disc.DVDProbeArgs(r.scan.Source, 1)...))
+	} else {
+		fmt.Println("# Disc scan: UDF + BDMV/PLAYLIST/*.mpls read by ripgo (no external command)")
+	}
 	fmt.Printf("# Pipeline: %s\n", mode)
 	fmt.Println(shellquote.Join("mkdir", "-p", r.opts.Output))
 
@@ -349,34 +340,30 @@ func (r *Ripper) printDryRun(ctx context.Context, titles []makemkv.Title, meta *
 		label := episodeLabel(i, isTV, r.opts.Season, r.opts.EpisodeStart, title)
 		titleDir := filepath.Join(tempDir, fmt.Sprintf("title_%02d", title.ID))
 
-		fileName := title.FileName
-		if fileName == "" {
-			fileName = "<title>.mkv"
-		}
-		rippedPath := filepath.Join(titleDir, fileName)
+		rippedPath := disc.RipFile(titleDir)
 		outPath := r.outputPath(ctx, r.opts.Output, ripJob{title: title, index: i}, meta, isTV, metaCfg)
 
 		fmt.Println()
 		fmt.Printf("# ==== [%d/%d] %s — title %d (%s) ====\n", i+1, len(titles), label, title.ID, formatDuration(title.Duration))
 		fmt.Println(shellquote.Join("mkdir", "-p", titleDir))
-		fmt.Println(shellquote.Join("makemkvcon", makemkv.RipArgs(r.cfg.DiscPath, title.ID, titleDir)...))
-		if title.FileName == "" {
-			fmt.Println("# MakeMKV reported no output file name; ripgo uses the first *.mkv in the title directory")
+		if meta := disc.ChapterMetadata(title); meta != "" {
+			fmt.Printf("cat > %s <<'EOF'\n%sEOF\n", shellquote.Quote(disc.ChaptersFile(titleDir)), meta)
 		}
+		fmt.Println(shellquote.Join("ffmpeg", append([]string{"-stats"}, disc.RipArgs(r.scan, title, titleDir)...)...))
 
 		fmt.Println("# Stream analysis after the rip (ripgo selects streams from this output):")
 		fmt.Println(shellquote.Join("ffprobe", encoder.ProbeArgs(rippedPath)...))
 
 		streams := toEncoderStreams(title)
 		if len(streams) == 0 {
-			fmt.Println("# No stream info in the MakeMKV scan; cannot predict -map arguments")
+			fmt.Println("# No stream info in the disc scan; cannot predict -map arguments")
 		} else {
-			fmt.Println("# Predicted from the MakeMKV scan (indices may differ if MakeMKV selects other streams):")
+			fmt.Println("# Selected from the disc scan (indices of the ripped file):")
 			for _, s := range encoder.SelectStreams(streams, settings) {
 				fmt.Printf("#   %s\n", describeStream(s))
 			}
 			if missing := encoder.MissingAudioTracks(streams, settings.AudioTracks); len(missing) > 0 {
-				fmt.Printf("# WARNING: audio track(s) %v not found in the MakeMKV scan\n", missing)
+				fmt.Printf("# WARNING: audio track(s) %v not found in the disc scan\n", missing)
 			}
 		}
 
@@ -493,7 +480,7 @@ func (r *Ripper) resolveProfile() (config.EncodingProfile, error) {
 
 // ---- content type resolution ----
 
-func (r *Ripper) resolveContentType(disc *makemkv.DiscInfo) (bool, error) {
+func (r *Ripper) resolveContentType(info *disc.DiscInfo) (bool, error) {
 	switch r.opts.Mode {
 	case "movie":
 		return false, nil
@@ -501,7 +488,7 @@ func (r *Ripper) resolveContentType(disc *makemkv.DiscInfo) (bool, error) {
 		return true, nil
 	}
 
-	det := makemkv.DetectContentType(disc.Titles)
+	det := disc.DetectContentType(info.Titles)
 	if det.Confidence >= 0.70 {
 		printInfo("Auto-detected: %s (%.0f%% confidence)", contentLabel(det.IsTV), det.Confidence*100)
 		return det.IsTV, nil
@@ -527,7 +514,7 @@ func sanitize(s string) string {
 	return strings.TrimSpace(invalidChars.ReplaceAllString(s, "_"))
 }
 
-func buildOutputPath(dir string, meta *metadata.Info, isTV bool, season, episode int, epTitle string, titleIndex int, _ bool) string {
+func buildOutputPath(dir string, meta *metadata.Info, isTV bool, season, episode int, epTitle string, titleIndex int) string {
 	if isTV {
 		name := fmt.Sprintf("%s - S%02dE%02d", sanitize(meta.Title), season, episode)
 		if epTitle != "" {
@@ -548,17 +535,14 @@ func buildOutputPath(dir string, meta *metadata.Info, isTV bool, season, episode
 
 // ---- display helpers ----
 
-func episodeLabel(index int, isTV bool, season, episodeStart int, title makemkv.Title) string {
+func episodeLabel(index int, isTV bool, season, episodeStart int, title disc.Title) string {
 	if isTV {
 		return fmt.Sprintf("S%02dE%02d", season, episodeStart+index)
 	}
-	if title.Name != "" {
-		return title.Name
+	if title.SourceFile != "" {
+		return "Playlist " + title.SourceFile
 	}
-	if index == 0 {
-		return "Main Feature"
-	}
-	return fmt.Sprintf("Title %d", index+1)
+	return fmt.Sprintf("Title %d", title.ID)
 }
 
 func contentLabel(isTV bool) string {
@@ -612,22 +596,10 @@ type msgQuit struct{ err error }
 // ---- TUI model state ----
 
 type liveBar struct {
-	label    string
-	frac     float64
-	start    time.Time
-	captions []string
-}
-
-const maxCaptions = 3
-
-func (lb *liveBar) pushCaption(c string) {
-	if c == "" {
-		return
-	}
-	lb.captions = append(lb.captions, c)
-	if len(lb.captions) > maxCaptions {
-		lb.captions = lb.captions[len(lb.captions)-maxCaptions:]
-	}
+	label   string
+	frac    float64
+	start   time.Time
+	caption string // ffmpeg speed and size
 }
 
 type uiModel struct {
@@ -736,9 +708,9 @@ func renderPanel(heading string, lb *liveBar, style lipgloss.Style, width int) s
 	content.WriteString(renderProgressBar(lb.frac, barWidth))
 	content.WriteString(suffix)
 
-	for _, c := range lb.captions {
+	if lb.caption != "" {
 		content.WriteByte('\n')
-		content.WriteString(dimStyle.Render(truncate(c, innerWidth)))
+		content.WriteString(dimStyle.Render(truncate(lb.caption, innerWidth)))
 	}
 
 	return style.Width(innerWidth).Render(content.String())
@@ -812,7 +784,9 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.label != "" {
 				s.label = msg.label
 			}
-			s.pushCaption(msg.caption)
+			if msg.caption != "" {
+				s.caption = msg.caption
+			}
 		}
 	case msgBarDone:
 		elapsed := ""
@@ -846,9 +820,10 @@ func (m uiModel) View() string {
 // ---- progress bar handle ----
 
 type bar struct {
-	slot     barSlot
-	label    string
-	lastPerm int // 0–1000 for 0.1% dedup
+	slot        barSlot
+	label       string
+	lastPerm    int // 0–1000 for 0.1% dedup
+	lastCaption string
 }
 
 func newBar(slot barSlot, label string) *bar {
@@ -883,9 +858,31 @@ func (b *bar) setLabel(label string) {
 }
 
 func (b *bar) setCaption(caption string) {
+	if caption == b.lastCaption {
+		return
+	}
+	b.lastCaption = caption
 	if uiProg != nil {
 		uiProg.Send(msgProgress{slot: b.slot, frac: -1, caption: caption})
 	}
+}
+
+// progress applies an ffmpeg progress report: fraction plus a "4.2x · 1.3 GB" caption.
+func (b *bar) progress(p ffmpeg.Progress) {
+	if p.Frac >= 0 {
+		b.set(p.Frac)
+	}
+	var parts []string
+	if p.Speed != "" {
+		parts = append(parts, p.Speed)
+	}
+	switch {
+	case p.Size >= 1e9:
+		parts = append(parts, fmt.Sprintf("%.1f GB", float64(p.Size)/1e9))
+	case p.Size > 0:
+		parts = append(parts, fmt.Sprintf("%.0f MB", float64(p.Size)/1e6))
+	}
+	b.setCaption(strings.Join(parts, " · "))
 }
 
 func (b *bar) done() {
@@ -939,7 +936,7 @@ func printInfo(format string, args ...any) {
 
 // ---- sequential pipeline (rip all, then encode all) ----
 
-func (r *Ripper) runSequential(ctx context.Context, titles []makemkv.Title, meta *metadata.Info, isTV bool, tempDir string, metaCfg metadata.Config, profile config.EncodingProfile) error {
+func (r *Ripper) runSequential(ctx context.Context, titles []disc.Title, meta *metadata.Info, isTV bool, tempDir string, metaCfg metadata.Config, profile config.EncodingProfile) error {
 	if uiProg != nil {
 		uiProg.Send(msgOverallInit{totalSteps: len(titles) * 2})
 	}
@@ -960,26 +957,14 @@ func (r *Ripper) runSequential(ctx context.Context, titles []makemkv.Title, meta
 		printInfo("[%d/%d] Ripping %s…", i+1, len(titles), label)
 
 		pb := newBar(slotRip, fmt.Sprintf("Rip  %s", label))
-		err := makemkv.RipTitle(ctx, r.cfg.DiscPath, title.ID, titleDir,
-			func(frac float64, caption string) {
-				if frac >= 0 {
-					pb.set(frac)
-				}
-				if caption != "" {
-					pb.setCaption(caption)
-				}
-			}, r.opts.Debug)
+		err := disc.Rip(ctx, r.scan, title, titleDir, pb.progress, r.opts.Debug)
 		pb.done()
 
 		if err != nil {
 			return fmt.Errorf("ripping title %d: %w", title.ID, err)
 		}
 
-		path, err := makemkv.FindRippedFile(titleDir)
-		if err != nil {
-			return fmt.Errorf("finding ripped file: %w", err)
-		}
-		ripped = append(ripped, ripJob{title: title, index: i, rippedPath: path})
+		ripped = append(ripped, ripJob{title: title, index: i, rippedPath: disc.RipFile(titleDir)})
 	}
 
 	for _, job := range ripped {

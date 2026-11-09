@@ -1,17 +1,15 @@
 package encoder
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/einfachnuralex/ripgo/internal/shellquote"
+	"github.com/einfachnuralex/ripgo/internal/ffmpeg"
 )
 
 // Stream describes a single media stream inside a file.
@@ -109,8 +107,8 @@ func Analyze(ctx context.Context, path string) (*FileInfo, error) {
 }
 
 // Encode transcodes inputFile to outputFile.
-// progressFn receives encoding progress as a 0..1 fraction.
-func Encode(ctx context.Context, inputFile, outputFile string, settings EncodeSettings, progressFn func(float64), debug bool) error {
+// progressFn receives the encoding progress (Frac 0..1, speed, size).
+func Encode(ctx context.Context, inputFile, outputFile string, settings EncodeSettings, progressFn func(ffmpeg.Progress), debug bool) error {
 	info, err := Analyze(ctx, inputFile)
 	if err != nil {
 		return fmt.Errorf("analyzing %s: %w", inputFile, err)
@@ -119,41 +117,8 @@ func Encode(ctx context.Context, inputFile, outputFile string, settings EncodeSe
 		return fmt.Errorf("audio track(s) %v not found in %s", missing, inputFile)
 	}
 
-	// -progress is a global option; ripgo parses it from stderr
-	args := append([]string{"-progress", "pipe:2"}, BuildArgs(inputFile, outputFile, info.Streams, settings)...)
-
-	if debug {
-		fmt.Fprintf(os.Stderr, "[ffmpeg] %s\n", shellquote.Join("ffmpeg", args...))
-	}
-
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("stderr pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start ffmpeg: %w", err)
-	}
-
-	scanner := bufio.NewScanner(stderr)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if debug {
-			fmt.Fprintf(os.Stderr, "[ffmpeg] %s\n", line)
-		}
-		if strings.HasPrefix(line, "out_time_us=") {
-			us, err := strconv.ParseFloat(strings.TrimPrefix(line, "out_time_us="), 64)
-			if err == nil && info.Duration > 0 {
-				frac := (us / 1e6) / info.Duration
-				if frac > 1 {
-					frac = 1
-				}
-				progressFn(frac)
-			}
-		}
-	}
-
-	return cmd.Wait()
+	// ffmpeg.Run adds -progress; ripgo parses it from stderr
+	return ffmpeg.Run(ctx, BuildArgs(inputFile, outputFile, info.Streams, settings), info.Duration, progressFn, debug)
 }
 
 // BuildArgs returns the ffmpeg arguments for encoding input to output, selecting
@@ -173,7 +138,7 @@ func SelectStreams(streams []Stream, s EncodeSettings) []Stream {
 		if lang == "" || lang == "und" {
 			return true
 		}
-		return langSet[strings.ToLower(lang)]
+		return langSet[strings.ToLower(lang)] || langSet[altLanguage(lang)]
 	}
 
 	var selected []Stream
@@ -240,6 +205,30 @@ func MissingAudioTracks(streams []Stream, tracks []int) []int {
 		}
 	}
 	return missing
+}
+
+// bibliographicTerminology maps the ISO 639-2/B language codes that differ from
+// their ISO 639-2/T counterpart. DVDs (dvdvideo demuxer) report B codes ("ger"),
+// Blu-ray playlists T codes ("deu").
+var bibliographicTerminology = map[string]string{
+	"alb": "sqi", "arm": "hye", "baq": "eus", "bur": "mya", "chi": "zho",
+	"cze": "ces", "dut": "nld", "fre": "fra", "geo": "kat", "ger": "deu",
+	"gre": "ell", "ice": "isl", "mac": "mkd", "mao": "mri", "may": "msa",
+	"per": "fas", "rum": "ron", "slo": "slk", "tib": "bod", "wel": "cym",
+}
+
+// altLanguage returns the other ISO 639-2 form (B ↔ T) of lang, or "" if there is none.
+func altLanguage(lang string) string {
+	lang = strings.ToLower(lang)
+	if t, ok := bibliographicTerminology[lang]; ok {
+		return t
+	}
+	for b, t := range bibliographicTerminology {
+		if t == lang {
+			return b
+		}
+	}
+	return ""
 }
 
 // audioBitrate is the fixed bitrate for audio streams transcoded to AAC.

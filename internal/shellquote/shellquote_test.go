@@ -12,7 +12,7 @@ func TestJoin(t *testing.T) {
 		{"ffmpeg", []string{"-i", "/tmp/My Movie (2020).mkv"}, "ffmpeg -i '/tmp/My Movie (2020).mkv'"},
 		{"echo", []string{"it's"}, `echo 'it'\''s'`},
 		{"echo", []string{""}, "echo ''"},
-		{"makemkvcon", []string{"-r", "mkv", "disc:0", "3"}, "makemkvcon -r mkv disc:0 3"},
+		{"ffmpeg", []string{"-playlist", "800", "-i", "bluray:/dev/sr0"}, "ffmpeg -playlist 800 -i bluray:/dev/sr0"},
 	}
 	for _, tt := range tests {
 		if got := Join(tt.name, tt.args...); got != tt.want {

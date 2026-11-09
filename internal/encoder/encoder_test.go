@@ -86,3 +86,21 @@ func TestSelectStreamsAudioTracks(t *testing.T) {
 		t.Errorf("MissingAudioTracks = %v, want [4 9]", m)
 	}
 }
+
+func TestSelectStreamsLanguageCodes(t *testing.T) {
+	// Blu-ray playlists use ISO 639-2/T codes, the config typically B codes.
+	streams := []Stream{
+		{Index: 0, Type: "audio", Codec: "ac3", Language: "deu", Channels: 6},
+		{Index: 1, Type: "audio", Codec: "ac3", Language: "fra", Channels: 6},
+		{Index: 2, Type: "audio", Codec: "ac3", Language: "dut", Channels: 6},
+		{Index: 3, Type: "audio", Codec: "ac3", Language: "eng", Channels: 6},
+	}
+	settings := EncodeSettings{Languages: []string{"ger", "nld", "eng"}, SurroundAudio: true}
+	var got []int
+	for _, s := range SelectStreams(streams, settings) {
+		got = append(got, s.Index)
+	}
+	if want := []int{0, 2, 3}; !slices.Equal(got, want) {
+		t.Errorf("selected indices = %v, want %v", got, want)
+	}
+}

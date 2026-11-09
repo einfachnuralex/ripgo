@@ -89,7 +89,7 @@ type Config struct {
 // Defaults returns a Config with sensible default values.
 func Defaults() *Config {
 	return &Config{
-		DiscPath:           "disc:0",
+		DiscPath:           "/dev/sr0",
 		Languages:          []string{"eng", "ger"},
 		StereoAudio:        true,
 		SurroundAudio:      true,

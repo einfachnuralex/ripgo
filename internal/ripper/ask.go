@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/einfachnuralex/ripgo/internal/disc"
 	"github.com/einfachnuralex/ripgo/internal/encoder"
-	"github.com/einfachnuralex/ripgo/internal/makemkv"
 )
 
 // ---- ask mode (--ask): interactive questions after the disc scan ----
@@ -75,13 +75,13 @@ func formatIndexList(list []int) string {
 }
 
 // pickTitles returns the titles with the given IDs, in the order of ids.
-func pickTitles(all []makemkv.Title, ids []int) ([]makemkv.Title, error) {
+func pickTitles(all []disc.Title, ids []int) ([]disc.Title, error) {
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("no title selected")
 	}
-	var picked []makemkv.Title
+	var picked []disc.Title
 	for _, id := range ids {
-		i := slices.IndexFunc(all, func(t makemkv.Title) bool { return t.ID == id })
+		i := slices.IndexFunc(all, func(t disc.Title) bool { return t.ID == id })
 		if i < 0 {
 			return nil, fmt.Errorf("title %d does not exist on the disc", id)
 		}
@@ -92,7 +92,7 @@ func pickTitles(all []makemkv.Title, ids []int) ([]makemkv.Title, error) {
 
 // chooseTitles lists all titles of the disc (defaults marked with *) and asks
 // which ones to process. The answer order is kept: for TV it sets the episode order.
-func chooseTitles(p *prompter, discType string, all, defaults []makemkv.Title) ([]makemkv.Title, error) {
+func chooseTitles(p *prompter, discType string, all, defaults []disc.Title) ([]disc.Title, error) {
 	isDefault := make(map[int]bool, len(defaults))
 	defIDs := make([]int, 0, len(defaults))
 	for _, t := range defaults {
@@ -100,24 +100,24 @@ func chooseTitles(p *prompter, discType string, all, defaults []makemkv.Title) (
 		defIDs = append(defIDs, t.ID)
 	}
 
-	showPlaylist := discType != "dvd" && slices.ContainsFunc(all, func(t makemkv.Title) bool { return t.SourceFile != "" })
+	showPlaylist := discType != "dvd" && slices.ContainsFunc(all, func(t disc.Title) bool { return t.SourceFile != "" })
 
 	fmt.Fprintln(p.out)
-	header := fmt.Sprintf("  %-2s %4s  %-8s  %7s  %4s", "", "ID", "Duration", "Size", "Ch.")
+	header := fmt.Sprintf("  %-2s %4s  %-8s  %4s", "", "ID", "Duration", "Ch.")
 	if showPlaylist {
 		header += fmt.Sprintf("  %-12s", "Playlist")
 	}
-	fmt.Fprintln(p.out, dimStyle.Render(header+"  Name"))
+	fmt.Fprintln(p.out, dimStyle.Render(header+"  Audio"))
 	for _, t := range all {
 		mark := " "
 		if isDefault[t.ID] {
 			mark = "*"
 		}
-		line := fmt.Sprintf("  %-2s %4d  %-8s  %5.1fGB  %4d", mark, t.ID, formatDuration(t.Duration), float64(t.Size)/1e9, t.Chapters)
+		line := fmt.Sprintf("  %-2s %4d  %-8s  %4d", mark, t.ID, formatDuration(t.Duration), t.Chapters)
 		if showPlaylist {
 			line += fmt.Sprintf("  %-12s", t.SourceFile)
 		}
-		fmt.Fprintln(p.out, line+"  "+t.Name)
+		fmt.Fprintln(p.out, line+"  "+audioLanguages(t))
 	}
 	fmt.Fprintln(p.out, dimStyle.Render("  * = selected by the duration filter"))
 
@@ -127,7 +127,7 @@ func chooseTitles(p *prompter, discType string, all, defaults []makemkv.Title) (
 	}
 	for {
 		ids, err := ParseIndexList(p.ask(label, formatIndexList(defIDs)))
-		var picked []makemkv.Title
+		var picked []disc.Title
 		if err == nil {
 			picked, err = pickTitles(all, ids)
 		}
@@ -178,10 +178,10 @@ func chooseAudio(p *prompter, streams []encoder.Stream, defaults []int) ([]int, 
 // title that has stream info. The choice applies to all selected titles.
 // It returns the explicit tracks, or the unchanged --audio-tracks value if the
 // scan has no stream info.
-func (r *Ripper) askAudio(p *prompter, selected []makemkv.Title, settings encoder.EncodeSettings) ([]int, error) {
-	i := slices.IndexFunc(selected, func(t makemkv.Title) bool { return len(t.Streams) > 0 })
+func (r *Ripper) askAudio(p *prompter, selected []disc.Title, settings encoder.EncodeSettings) ([]int, error) {
+	i := slices.IndexFunc(selected, func(t disc.Title) bool { return len(t.Streams) > 0 })
 	if i < 0 {
-		printWarn("No stream info in the MakeMKV scan; cannot ask for audio tracks")
+		printWarn("No stream info in the disc scan; cannot ask for audio tracks")
 		return r.opts.AudioTracks, nil
 	}
 	ref := selected[i]
@@ -213,8 +213,24 @@ func (r *Ripper) askAudio(p *prompter, selected []makemkv.Title, settings encode
 	return tracks, nil
 }
 
-// toEncoderStreams converts the SINFO streams of a scanned title to the encoder's stream type.
-func toEncoderStreams(t makemkv.Title) []encoder.Stream {
+// audioLanguages returns the languages of the audio streams of t, e.g. "eng,ger".
+func audioLanguages(t disc.Title) string {
+	var langs []string
+	for _, s := range t.Streams {
+		if s.Type != "audio" {
+			continue
+		}
+		lang := s.Language
+		if lang == "" {
+			lang = "und"
+		}
+		langs = append(langs, lang)
+	}
+	return strings.Join(langs, ",")
+}
+
+// toEncoderStreams converts the scanned streams of a title to the encoder's stream type.
+func toEncoderStreams(t disc.Title) []encoder.Stream {
 	streams := make([]encoder.Stream, 0, len(t.Streams))
 	for _, s := range t.Streams {
 		streams = append(streams, encoder.Stream{

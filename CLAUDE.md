@@ -1,13 +1,18 @@
 # ripgo
 
-Go-based disc ripping and encoding pipeline. Wraps **MakeMKV** (rip) and **FFmpeg** (encode) into a single CLI with a bubbletea TUI progress display.
+Go-based disc ripping and encoding pipeline. Reads the DVD/Blu-ray structure itself (UDF, IFO, MPLS) and uses **FFmpeg** for both rip (lossless remux) and encode, in a single CLI with a bubbletea TUI progress display.
 
 ## Project structure
 
 ```
 cmd/ripgo/main.go              CLI entry point, flag parsing
 internal/config/config.go      YAML config loading + defaults
-internal/makemkv/makemkv.go    MakeMKV wrapper (scan + rip)
+internal/disc/disc.go          Disc types, Scan, Rip/RipArgs (ffmpeg remux), title filter, TV detection
+internal/disc/udf.go           Read-only UDF reader (drive / ISO) for the navigation files
+internal/disc/mpls.go          Blu-ray playlist parser (durations, STN streams with PID + language, chapters)
+internal/disc/bluray.go        Blu-ray scan (MPLS, bdmt_*.xml title, KEYDB check)
+internal/disc/dvd.go           DVD scan (VIDEO_TS.IFO title table + ffprobe dvdvideo per title)
+internal/ffmpeg/ffmpeg.go      Runs ffmpeg with -progress, parses progress, keeps stderr tail for errors
 internal/encoder/encoder.go    FFmpeg wrapper (probe + encode)
 internal/metadata/metadata.go  TMDB / OMDB / TVDB lookups
 internal/ripper/ripper.go      Orchestration, pipeline, TUI, dry run
@@ -17,19 +22,22 @@ internal/shellquote/           POSIX shell quoting for printed commands
 
 ## Prerequisites
 
-Three external binaries must be in PATH:
-- `makemkvcon` — MakeMKV CLI
-- `ffmpeg` — encoding
-- `ffprobe` — stream analysis (part of FFmpeg)
+Only the FFmpeg tools must be in PATH:
+- `ffmpeg` — rip (remux) and encoding
+- `ffprobe` — DVD title scan and stream analysis
 
-Checked at startup via `checkPrerequisites()` in `cmd/ripgo/main.go`.
+Checked at startup via `checkPrerequisites()` in `cmd/ripgo/main.go`. `disc.CheckSupport` checks after the type detection that ffmpeg was built with the `dvdvideo` demuxer (libdvdnav/libdvdread) or the `bluray` protocol (libbluray).
+
+Decryption is done by libraries ffmpeg loads, not by ripgo: CSS via libdvdcss, AACS via libaacs + `~/.config/aacs/KEYDB.cfg` (missing KEYDB only produces a warning), BD+ via libbdplus. UHD (AACS 2.0) usually fails at the rip.
 
 ## Pipeline
 
 Two phases to avoid a conflict between `fmt.Scanln` (interactive prompt) and bubbletea (raw terminal mode):
 
 **Phase 1 — plain stdout** (before TUI starts):
-1. Scan disc (`makemkvcon -r --robot info`)
+1. Scan disc (`disc.Scan`): source = drive, ISO or directory (`disc:N` → `/dev/srN`, `file:X` → `X` for old configs). Type from `BDMV/index.bdmv` (`0300` → uhd) or `VIDEO_TS/VIDEO_TS.IFO`; `--disc-type` overrides.
+   - **Blu-ray**: all `BDMV/PLAYLIST/*.mpls` parsed in Go (playlists < 120 s skipped). Title ID = playlist number. Streams = STN table of the first play item (primary video, primary audio, PG; main-path entries only) — the m2ts clips contain more PIDs (other language versions) than a playlist uses. No ffprobe, since the `bluray:` protocol exposes neither languages nor chapters and reports a wrong duration. Name from `BDMV/META/DL/bdmt_eng.xml`, else UDF label.
+   - **DVD**: title count + chapters from the TT_SRPT in `VIDEO_TS.IFO`, then `ffprobe -f dvdvideo -title N` per title (duration, streams, languages). Title ID = DVD title number (1-based).
 2. Auto-detect content type (TV / movie) or prompt user
 3. Metadata lookup (TMDB → OMDB → TVDB fallback chain)
 
@@ -48,7 +56,7 @@ Three lipgloss panels rendered via `lipgloss.JoinVertical`:
 - **Encoding** — cyan border (`"6"`)
 - **Overall Progress** — yellow border (`"3"`)
 
-Each panel shows: task label, Unicode block bar (`█░`), percentage (1 decimal), elapsed time, ETA, and up to 3 caption lines (ring buffer from MakeMKV status messages).
+Each panel shows: task label, Unicode block bar (`█░`), percentage (1 decimal), elapsed time, ETA, and one caption line with ffmpeg speed and size (`4.2x · 1.3 GB`, from `-progress`).
 
 Progress updates use permille (0–1000) deduplication to avoid flooding the event loop with identical values.
 
@@ -74,7 +82,7 @@ Full example:
 
 ```yaml
 disc:
-  default_path: "disc:0"
+  default_path: "/dev/sr0"   # drive, ISO image or directory with VIDEO_TS/BDMV
   default_temp_dir: "/tmp/ripgo-cache"
 
 output:
@@ -154,7 +162,7 @@ The type chain: `config.EncodingProfile` (config package) → converted to `enco
 ```
 --output, -o <path>        Output directory (required)
 --mode <mode>              auto | movie | tv  (default: auto)
---disc <path>              Disc path (default: disc:0)
+--disc <path>              Drive, ISO image or directory with VIDEO_TS/BDMV (default: /dev/sr0)
 --temp <path>              Cache directory for ripped files
 --title <text>             Override title for metadata lookup
 --year <year>              Release year
@@ -167,7 +175,7 @@ The type chain: `config.EncodingProfile` (config package) → converted to `enco
 --profile <name>           Encoding profile name (defined in config file)
 --audio-tracks <i,j,...>   Audio stream indices (ffprobe index, e.g. 1,3); overrides language/channel selection
 --ask                      Ask for title, titles/playlists and audio tracks after the disc scan
---debug                    Verbose output: MakeMKV lines + makemkvcon/ffmpeg commands
+--debug                    Verbose output: ffprobe/ffmpeg commands and their full stderr
 --dry-run                  Scan + metadata only; print all commands instead of running them
 -v, --version              Show version
 -h, --help                 Show help
@@ -178,18 +186,18 @@ The type chain: `config.EncodingProfile` (config package) → converted to `enco
 Part of Phase 1 (plain stdout, before the TUI). After the disc scan and TV/movie detection, `Run` asks three questions via a shared `prompter` (`internal/ripper/ask.go`). Enter accepts the default shown in brackets; invalid input is asked again; EOF on stdin accepts the defaults.
 
 1. **Title** — default `--title`, else disc name. The answer is used for the metadata lookup.
-2. **Titles (DVD) / Playlists (Blu-ray)** — comma-separated MakeMKV title IDs. All titles are listed (`*` = passed the duration filter, which is the default). For Blu-ray the playlist (`Title.SourceFile`, TINFO 16, e.g. `00800.mpls`) is shown, but the ID is what you enter. The input order is kept and defines the episode order in TV mode.
+2. **Titles (DVD) / Playlists (Blu-ray)** — comma-separated title IDs (DVD title number, Blu-ray playlist number). All titles are listed with duration, chapters, playlist (BD) and audio languages (`*` = passed the duration filter, which is the default). The input order is kept and defines the episode order in TV mode.
 3. **Audio tracks** — comma-separated stream indices, listed from the first selected title (default: `--audio-tracks`, else what `encoder.SelectStreams` would pick). Applies to all selected titles; the answer replaces `Options.AudioTracks`. Only audio streams are accepted. Empty answer with no default keeps the automatic selection.
 
 `--ask` works together with `--dry-run`. `resolveProfile` runs before the questions so a bad `--profile` fails early.
 
 ## Dry run (`--dry-run`)
 
-Runs Phase 1 for real (disc scan, TV/movie detection incl. prompt, metadata + episode titles, profile), then prints the commands a real run would execute as a commented shell script on stdout (`Ripper.printDryRun`). Nothing is created, deleted, ripped or encoded; no TUI. A non-empty cache dir only produces a warning. Only `makemkvcon` is required in PATH.
+Runs Phase 1 for real (disc scan, TV/movie detection incl. prompt, metadata + episode titles, profile), then prints the commands a real run would execute as a commented shell script on stdout (`Ripper.printDryRun`). Nothing is created, deleted, ripped or encoded; no TUI. A non-empty cache dir only produces a warning. Only `ffprobe` is required in PATH.
 
-- Command args come from the same functions the real run uses: `makemkv.ScanArgs` / `makemkv.RipArgs`, `encoder.ProbeArgs` / `encoder.BuildArgs`. All are quoted with `shellquote.Join`.
-- `encoder.BuildArgs` excludes `-progress pipe:2`; `Encode` prepends it, the dry run prepends `-stats` instead (shows progress despite `-loglevel warning`).
-- **Stream mapping is a prediction**: the real run selects streams via ffprobe on the ripped file, which doesn't exist yet. The dry run uses the `SINFO` stream info from the scan (`Title.Streams`; attr 1 type, 3 lang, 5 codec id → normalized to ffprobe names, 14 channels, 19 `WxH`). Indices can differ if MakeMKV selects other streams, so the ffprobe command is printed too. The ripped file name comes from `TINFO` 27 (`Title.FileName`).
+- Command args come from the same functions the real run uses: `disc.DVDProbeArgs` / `disc.RipArgs` / `disc.ChapterMetadata` (printed as heredoc), `encoder.ProbeArgs` / `encoder.BuildArgs`. All are quoted with `shellquote.Join`.
+- `disc.RipArgs` and `encoder.BuildArgs` exclude the progress flags; `ffmpeg.Run` prepends `-progress pipe:2 -nostats`, the dry run prepends `-stats` instead.
+- **Stream indices are exact**: the rip maps exactly `Title.Streams` in order (`Stream.Source` = `0:<idx>` for DVD, `0:i:<PID>` for Blu-ray), so `Stream.Index` is the index in the ripped `title.mkv`. Blu-ray languages are written with `-metadata:s:N language=…`, chapters from `chapters.txt` (FFMETADATA, 45 kHz timebase) via `-map_chapters 1`. The encoder still selects from ffprobe on the ripped file; the ffprobe command is printed too.
 
 ## Build
 
@@ -198,13 +206,14 @@ go build ./...
 go build -o ripgo ./cmd/ripgo
 ```
 
-No code generation. No external test fixtures needed for `go build`. Unit tests: `go test ./...` (shellquote, SINFO parsing, ffmpeg args).
+No code generation. No external test fixtures needed for `go build`. Unit tests: `go test ./...` (shellquote, MPLS/IFO/UDF parsing, rip/ffmpeg args, progress parsing, ask mode). `RIPGO_TEST_DISC=/dev/sr0 go test -run ScanImage -v ./internal/disc/` scans a real drive, ISO or directory.
 
 ## Key design decisions
 
 - **No alt-screen**: bubbletea runs with `tea.WithOutput(os.Stdout)` (inline mode) so log lines printed before the TUI remain visible in the terminal scrollback.
 - **Two-phase split**: `fmt.Scanln` for the TV/movie prompt must run before `tea.NewProgram` takes the terminal into raw mode.
 - **Import cycle prevention**: `config` defines `EncodingProfile`; `encoder` defines `VideoProfile`. Conversion happens in `ripper` which imports both.
-- **makemkvcon exit code**: it returns non-zero even on success; the scan only fails if both `disc.Name` and `titles` are empty after parsing.
+- **Own disc parsing instead of a disc tool**: ffmpeg's `bluray:` protocol only delivers the transport stream (no languages, no chapters, wrong duration) and cannot read files from the disc. The UDF reader reads only the small, unencrypted navigation files with sector-aligned reads (works on raw `/dev/srN`); content is always read by ffmpeg.
+- **Language codes**: DVDs report ISO 639-2/B (`ger`), Blu-ray playlists 639-2/T (`deu`); `encoder.SelectStreams` matches both forms (`altLanguage`).
 - **Audio codec handling**: only AAC is stream-copied; everything else (incl. AC3/EAC3) is transcoded to AAC 160k. Stream selection is per-language and per-channel-count (stereo ≤2ch, surround >2ch). `--audio-tracks` selects streams by index instead (language/channel filters are skipped for audio); a requested index that is not an audio stream makes `Encode` fail, the dry run only warns.
-- **ffmpeg error output**: stderr is piped and consumed for progress parsing (`out_time_us=`). Non-progress lines (actual errors) are only forwarded to the user when `--debug` is set. Without `--debug`, encoding failures show only the exit code (e.g. `exit status 218`) with no human-readable message. This is a known gap.
+- **ffmpeg error output**: `ffmpeg.Run` parses `-progress` from stderr and keeps the last 10 other lines; a failed rip/encode returns them in the error (`exit status 251: … | Error opening input files: …`). `--debug` additionally prints every stderr line.
